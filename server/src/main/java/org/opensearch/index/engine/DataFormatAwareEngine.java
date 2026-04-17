@@ -29,6 +29,7 @@ import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.VersionType;
 import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.dataformat.DataFormatRegistry;
+import org.opensearch.index.engine.dataformat.DeleteDataFormat;
 import org.opensearch.index.engine.dataformat.FileInfos;
 import org.opensearch.index.engine.dataformat.IndexingEngineConfig;
 import org.opensearch.index.engine.dataformat.IndexingExecutionEngine;
@@ -121,6 +122,8 @@ public class DataFormatAwareEngine implements Indexer {
     private final LockablePool<Writer<?>> writerPool;
     private final AtomicLong writerGenerationCounter;
 
+    private final DeleteDataFormat deleteDataFormat;
+
     private final Map<DataFormat, EngineReaderManager<?>> readerManagers;
 
     private final CatalogSnapshotManager catalogSnapshotManager;
@@ -208,6 +211,7 @@ public class DataFormatAwareEngine implements Indexer {
 
             // Move to data format aware writers and readers.
             DataFormatRegistry registry = engineConfig.getDataFormatRegistry();
+            DataFormat activeFormat = registry.format(config().getIndexSettings().pluggableDataFormat());
             // Create indexing engine
             // Pass committer here as well.
             this.indexingExecutionEngine = registry.getIndexingEngine(
@@ -218,8 +222,12 @@ public class DataFormatAwareEngine implements Indexer {
                     config().getStore(),
                     registry
                 ),
-                registry.format(config().getIndexSettings().pluggableDataFormat())
+                activeFormat
             );
+
+            // If the active data format does not handle deletes natively, create a
+            // DeleteDataFormat to track deletions via .liv bitset files.
+            this.deleteDataFormat = activeFormat.handlesDeletesNatively() ? null : new DeleteDataFormat();
             this.writerGenerationCounter = new AtomicLong(1L);// committer.getCommitStats().getGeneration());
             this.writerPool = new LockablePool<>(
                 () -> indexingExecutionEngine.createWriter(writerGenerationCounter.getAndIncrement()),
@@ -437,12 +445,12 @@ public class DataFormatAwareEngine implements Indexer {
             } else if (indexResult.getSeqNo() != UNASSIGNED_SEQ_NO
                 && indexResult.getFailure() != null
                 && !(indexResult.getFailure() instanceof AppendOnlyIndexOperationRetryException)) {
-                    throw new UnsupportedOperationException(
-                        "recording document failure as a no-op in translog is not " + "supported for Data format engine"
-                    );
-                } else {
-                    location = null;
-                }
+                throw new UnsupportedOperationException(
+                    "recording document failure as a no-op in translog is not " + "supported for Data format engine"
+                );
+            } else {
+                location = null;
+            }
             indexResult.setTranslogLocation(location);
         }
 

@@ -46,6 +46,15 @@ public abstract class DataFormat {
      */
     public abstract Set<FieldTypeCapabilities> supportedFields();
 
+    /**
+     * Returns whether this data format natively handles document deletes and updates.
+     *
+     * @return {@code true} if this format manages its own delete tracking, {@code false} otherwise
+     */
+    public boolean handlesDeletesNatively() {
+        return false;
+    }
+
     @Override
     public final boolean equals(Object o) {
         if (this == o) return true;
