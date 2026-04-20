@@ -46,6 +46,19 @@ public abstract class DataFormat {
      */
     public abstract Set<FieldTypeCapabilities> supportedFields();
 
+    /**
+     * Returns whether this data format handles document deletes natively.
+     * If {@code true}, the engine will not initialize a separate {@link DeleteDataFormat}.
+     * <p>
+     * Defaults to {@code false}. Formats like Lucene that track deletes via their own
+     * mechanisms should override this to return {@code true}.
+     *
+     * @return {@code true} if this format handles deletes natively
+     */
+    public boolean handlesDeletesNatively() {
+        return false;
+    }
+
     @Override
     public final boolean equals(Object o) {
         if (this == o) return true;

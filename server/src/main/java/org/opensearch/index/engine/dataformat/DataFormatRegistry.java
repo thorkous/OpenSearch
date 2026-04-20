@@ -47,6 +47,7 @@ public class DataFormatRegistry {
     private final Map<DataFormat, CheckedFunction<ReaderManagerConfig, EngineReaderManager<?>, IOException>> readerManagerBuilders;
 
     private final Map<String, DataFormat> dataFormats;
+    private DeleteDataFormatPlugin deleteDataFormatPlugin;
 
     /**
      * Creates a registry by discovering all {@link DataFormatPlugin} and {@link SearchBackEndPlugin} implementations
@@ -74,6 +75,10 @@ public class DataFormatRegistry {
             for (DataFormat format : plugin.getSupportedFormats()) {
                 readerManagerBuilders.put(format, settings -> plugin.createReaderManager(settings));
             }
+        }
+
+        for (DeleteDataFormatPlugin deletePlugin : pluginsService.filterPlugins(DeleteDataFormatPlugin.class)) {
+            this.deleteDataFormatPlugin = deletePlugin;
         }
 
         this.dataFormatPluginRegistry = Map.copyOf(dataFormatPlugiRegistry);
@@ -184,5 +189,18 @@ public class DataFormatRegistry {
             readerManagers.put(entry.getKey(), entry.getValue().apply(settings));
         }
         return readerManagers;
+    }
+
+    /**
+     * Returns the {@link DeleteDataFormat} if the active format does not handle deletes natively.
+     *
+     * @param activeFormat the active data format for the index
+     * @return the delete data format, or empty if the active format handles deletes natively
+     */
+    public Optional<DeleteDataFormat> getDeleteDataFormat(DataFormat activeFormat) {
+        if (activeFormat.handlesDeletesNatively()) {
+            return Optional.empty();
+        }
+        return Optional.of((DeleteDataFormat) deleteDataFormatPlugin.getDataFormat());
     }
 }

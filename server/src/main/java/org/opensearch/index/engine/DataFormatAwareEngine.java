@@ -28,6 +28,7 @@ import org.opensearch.core.index.AppendOnlyIndexOperationRetryException;
 import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.VersionType;
 import org.opensearch.index.engine.dataformat.DataFormat;
+import org.opensearch.index.engine.dataformat.DeleteDataFormat;
 import org.opensearch.index.engine.dataformat.DataFormatRegistry;
 import org.opensearch.index.engine.dataformat.FileInfos;
 import org.opensearch.index.engine.dataformat.IndexingEngineConfig;
@@ -122,6 +123,7 @@ public class DataFormatAwareEngine implements Indexer {
     private final AtomicLong writerGenerationCounter;
 
     private final Map<DataFormat, EngineReaderManager<?>> readerManagers;
+    private final DeleteDataFormat deleteDataFormat;
 
     private final CatalogSnapshotManager catalogSnapshotManager;
     private final Committer committer;
@@ -235,6 +237,10 @@ public class DataFormatAwareEngine implements Indexer {
                 engineConfig.getIndexSettings(),
                 store.shardPath()
             );
+
+            this.deleteDataFormat = registry.getDeleteDataFormat(
+                registry.format(config().getIndexSettings().pluggableDataFormat())
+            ).orElse(null);
 
             this.lastRefreshedCheckpointListener = new LastRefreshedCheckpointListener(localCheckpointTracker);
             this.indexingStrategyPlanner = new IndexingStrategyPlanner(
