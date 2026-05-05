@@ -40,6 +40,23 @@ public interface DataFormatPlugin {
     IndexingExecutionEngine<?, ?> indexingEngine(IndexingEngineConfig settings);
 
     /**
+     * Creates the delete execution engine for this data format.
+     * The default implementation returns {@code null}, which signals the registry
+     * to create a universal {@code DeleteExecutionEngineImpl} backed by a
+     * {@code LuceneIndexingExecutionEngine} + {@code LuceneCommitter}.
+     *
+     * <p>All format plugins use the same universal implementation today.
+     * The method exists on the interface for future extensibility.
+     *
+     * @param settings the engine initialization settings
+     * @return the delete execution engine, or {@code null} for default behavior
+     */
+    default DeleteExecutionEngine<?> deleteEngine(IndexingEngineConfig settings) {
+        // TODO: Return new DeleteExecutionEngineImpl(getDataFormat(), settings) once implementation is ready
+        return null;
+    }
+
+    /**
      * Returns format descriptor suppliers for this plugin, filtered by the given index settings.
      * Each entry maps a format name to a {@link Supplier} of its {@link DataFormatDescriptor},
      * deferring descriptor object creation until the descriptor is actually needed.

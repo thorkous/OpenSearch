@@ -31,6 +31,7 @@ import org.opensearch.core.index.shard.ShardId;
 import org.opensearch.index.VersionType;
 import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.dataformat.DataFormatRegistry;
+import org.opensearch.index.engine.dataformat.DeleteExecutionEngine;
 import org.opensearch.index.engine.dataformat.FileInfos;
 import org.opensearch.index.engine.dataformat.IndexingEngineConfig;
 import org.opensearch.index.engine.dataformat.IndexingExecutionEngine;
@@ -130,6 +131,7 @@ public class DataFormatAwareEngine implements Indexer {
     private final Store store;
 
     private final IndexingExecutionEngine indexingExecutionEngine;
+    private final DeleteExecutionEngine<?> deleteExecutionEngine;
     private final IndexingStrategyPlanner indexingStrategyPlanner;
     private final LockablePool<Writer<?>> writerPool;
     private final AtomicLong writerGenerationCounter;
@@ -232,23 +234,32 @@ public class DataFormatAwareEngine implements Indexer {
 
             // 5. Create IndexingExecutionEngine and ReaderManagers
             DataFormatRegistry registry = engineConfig.getDataFormatRegistry();
+            IndexingEngineConfig indexingEngineConfig = new IndexingEngineConfig(
+                committer,
+                config().getMapperService(),
+                config().getIndexSettings(),
+                config().getStore(),
+                registry,
+                config().getChecksumStrategies()
+            );
             this.indexingExecutionEngine = registry.getIndexingEngine(
-                new IndexingEngineConfig(
-                    committer,
-                    config().getMapperService(),
-                    config().getIndexSettings(),
-                    config().getStore(),
-                    registry,
-                    config().getChecksumStrategies()
-                ),
+                indexingEngineConfig,
                 registry.format(config().getIndexSettings().pluggableDataFormat())
             );
             this.writerGenerationCounter = new AtomicLong(1L);
-            this.writerPool = new LockablePool<>(
-                () -> indexingExecutionEngine.createWriter(writerGenerationCounter.getAndIncrement()),
-                LinkedList::new,
-                Runtime.getRuntime().availableProcessors()
+
+            // 6. Create DeleteExecutionEngine
+            this.deleteExecutionEngine = registry.getDeleteEngine(
+                indexingEngineConfig,
+                registry.format(config().getIndexSettings().pluggableDataFormat())
             );
+
+            this.writerPool = new LockablePool<>(() -> {
+                long gen = writerGenerationCounter.getAndIncrement();
+                Writer<?> writer = indexingExecutionEngine.createWriter(gen);
+                deleteExecutionEngine.createDeleter(writer);
+                return writer;
+            }, LinkedList::new, Runtime.getRuntime().availableProcessors());
             // Create Reader managers
             // We will pass IndexStoreProvider to this, which would contain store
             // and any index specific attributes useful for reads.

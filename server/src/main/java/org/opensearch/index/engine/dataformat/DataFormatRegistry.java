@@ -197,6 +197,23 @@ public class DataFormatRegistry {
     }
 
     /**
+     * Returns the delete execution engine for the given format.
+     * Delegates to the format's plugin via {@link DataFormatPlugin#deleteEngine(IndexingEngineConfig)}.
+     * If the plugin returns {@code null}, the caller is responsible for providing a default.
+     *
+     * @param config the engine initialization settings
+     * @param format the data format
+     * @return the delete execution engine, or {@code null} if the plugin does not provide one
+     */
+    public DeleteExecutionEngine<?> getDeleteEngine(IndexingEngineConfig config, DataFormat format) {
+        DataFormatPlugin plugin = dataFormatPluginRegistry.get(format);
+        if (plugin == null) {
+            throw new IllegalArgumentException("No plugin registered for DataFormat [" + format.name() + "]");
+        }
+        return plugin.deleteEngine(config);
+    }
+
+    /**
      * Creates {@link EngineReaderManager} instances for all applicable data formats based on index settings/mappings.
      * Each reader manager is instantiated by applying the store provider and shard path to the factory registered
      * by the corresponding {@link SearchBackEndPlugin}.
