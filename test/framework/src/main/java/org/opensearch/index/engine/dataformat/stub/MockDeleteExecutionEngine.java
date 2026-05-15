@@ -64,6 +64,16 @@ public class MockDeleteExecutionEngine implements DeleteExecutionEngine<DataForm
         deleters.clear();
     }
 
+    @Override
+    public void beforeRefresh() throws IOException {
+        // No-op in mock
+    }
+
+    @Override
+    public void afterRefresh(boolean didRefresh) throws IOException {
+        // No-op in mock
+    }
+
     private static class MockDeleter implements Deleter {
         private final long generation;
 

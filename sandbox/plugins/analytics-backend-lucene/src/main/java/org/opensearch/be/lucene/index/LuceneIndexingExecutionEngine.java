@@ -27,6 +27,7 @@ import org.opensearch.be.lucene.LuceneFieldFactoryRegistry;
 import org.opensearch.be.lucene.merge.LuceneMerger;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.index.engine.dataformat.DataFormat;
+import org.opensearch.index.engine.dataformat.DeleteExecutionEngine;
 import org.opensearch.index.engine.dataformat.IndexingExecutionEngine;
 import org.opensearch.index.engine.dataformat.Merger;
 import org.opensearch.index.engine.dataformat.RefreshInput;
@@ -188,7 +189,7 @@ public class LuceneIndexingExecutionEngine implements IndexingExecutionEngine<Lu
      * @throws IOException if addIndexes or reader opening fails
      */
     @Override
-    public RefreshResult refresh(RefreshInput refreshInput) throws IOException {
+    public RefreshResult refresh(RefreshInput refreshInput, DeleteExecutionEngine<?> deleteExecutionEngine) throws IOException {
         if (refreshInput == null || sharedWriter == null) {
             return new RefreshResult(List.of());
         }
@@ -218,8 +219,12 @@ public class LuceneIndexingExecutionEngine implements IndexingExecutionEngine<Lu
         // Single batched addIndexes call for all source directories
         if (sourceDirectories.isEmpty() == false) {
             try {
+                logger.info("[REFRESH] BEFORE addIndexes: sharedWriter.numDocs=[{}], maxDoc=[{}], hasPendingMerges=[{}], numRamDocs=[{}], pendingNumDocs=[{}]",
+                    sharedWriter.getDocStats().numDocs, sharedWriter.getDocStats().maxDoc,
+                    sharedWriter.hasPendingMerges(), sharedWriter.numRamDocs(), sharedWriter.getPendingNumDocs());
                 sharedWriter.addIndexes(sourceDirectories.toArray(new Directory[0]));
-                logger.debug("Incorporated {} Lucene segments into shared writer in a single addIndexes call", sourceDirectories.size());
+                logger.info("[REFRESH] AFTER addIndexes: sharedWriter.numDocs=[{}], maxDoc=[{}], pendingNumDocs=[{}]",
+                    sharedWriter.getDocStats().numDocs, sharedWriter.getDocStats().maxDoc, sharedWriter.getPendingNumDocs());
             } finally {
                 // Close all source directories
                 for (Directory dir : sourceDirectories) {
@@ -231,6 +236,12 @@ public class LuceneIndexingExecutionEngine implements IndexingExecutionEngine<Lu
                 }
             }
 
+            // After addIndexes, apply parent deletes for flushed generations
+            // so they are pending when DirectoryReader.open resolves them.
+            if (deleteExecutionEngine != null) {
+                deleteExecutionEngine.applyParentDeletesAfterAddIndexes();
+            }
+
             // After addIndexes, open an NRT reader to discover the actual file names
             // for the newly added segments. Lucene renames files during addIndexes,
             // so the original temp directory file names are no longer valid.
@@ -238,11 +249,14 @@ public class LuceneIndexingExecutionEngine implements IndexingExecutionEngine<Lu
 
             try (DirectoryReader reader = DirectoryReader.open(sharedWriter)) {
                 List<LeafReaderContext> leaves = reader.leaves();
-
+                logger.info("[REFRESH] NRT reader opened: numLeaves=[{}], totalDocs=[{}]", leaves.size(), reader.numDocs());
                 for (int i = 0; i < leaves.size(); i++) {
                     LeafReaderContext ctx = leaves.get(i);
                     if (ctx.reader() instanceof SegmentReader segReader) {
                         SegmentCommitInfo segInfo = segReader.getSegmentInfo();
+                        logger.info("[REFRESH] Segment[{}]: name=[{}], maxDoc=[{}], numDocs=[{}], delCount=[{}], files=[{}]",
+                            i, segInfo.info.name, segInfo.info.maxDoc(), segReader.numDocs(),
+                            segInfo.getDelCount(), segInfo.files());
                         String genAttr = segInfo.info.getAttribute(LuceneWriter.WRITER_GENERATION_ATTRIBUTE);
                         if (genAttr == null) {
                             continue;
@@ -278,6 +292,11 @@ public class LuceneIndexingExecutionEngine implements IndexingExecutionEngine<Lu
     @Override
     public Merger getMerger() {
         return this.luceneMerger;
+    }
+
+    @Override
+    public RefreshResult refresh(RefreshInput refreshInput) throws IOException {
+        return refresh(refreshInput, null);
     }
 
     /**

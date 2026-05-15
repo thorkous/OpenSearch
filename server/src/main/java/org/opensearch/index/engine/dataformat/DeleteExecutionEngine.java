@@ -8,6 +8,7 @@
 
 package org.opensearch.index.engine.dataformat;
 
+import org.apache.lucene.search.ReferenceManager;
 import org.opensearch.common.annotation.ExperimentalApi;
 
 import java.io.Closeable;
@@ -23,11 +24,15 @@ import java.io.IOException;
  * durable delete tracking. The engine decides at runtime whether to create its
  * own Lucene infrastructure (Parquet-only) or reuse an existing one (composite/Lucene).
  *
+ * <p>Implements {@link ReferenceManager.RefreshListener} so it can participate in the
+ * refresh lifecycle: {@code beforeRefresh()} drains buffered deletes into the parent
+ * writer, and {@code afterRefresh()} cleans up stale generation entries.
+ *
  * @param <T> the data format type
  * @opensearch.experimental
  */
 @ExperimentalApi
-public interface DeleteExecutionEngine<T extends DataFormat> extends Closeable {
+public interface DeleteExecutionEngine<T extends DataFormat> extends Closeable, ReferenceManager.RefreshListener {
 
     /**
      * Creates a new deleter paired with the given writer.
@@ -65,4 +70,30 @@ public interface DeleteExecutionEngine<T extends DataFormat> extends Closeable {
      * @throws IOException if an I/O error occurs during deletion
      */
     DeleteResult deleteDocument(DeleteInput deleteInput) throws IOException;
+
+    /**
+     * Applies buffered deletes for a specific generation to the child writer.
+     * Called before flush so deletes are baked into the flushed segment.
+     * Marks the generation as flushed so late-arriving deletes route to parent.
+     *
+     * @param generation the writer generation
+     * @throws IOException if an I/O error occurs
+     */
+    default void applyDeletesForGeneration(long generation) throws IOException {}
+
+    /**
+     * Applies parent deletes for docs already in parent (gen=-1).
+     * Called BEFORE addIndexes.
+     *
+     * @throws IOException if an I/O error occurs
+     */
+    default void applyParentDeletesBeforeAddIndexes() throws IOException {}
+
+    /**
+     * Applies parent deletes for docs arriving via addIndexes (flushed gens).
+     * Called AFTER addIndexes.
+     *
+     * @throws IOException if an I/O error occurs
+     */
+    default void applyParentDeletesAfterAddIndexes() throws IOException {}
 }

@@ -54,6 +54,14 @@ public interface IndexingExecutionEngine<T extends DataFormat, P extends Documen
     RefreshResult refresh(RefreshInput refreshInput) throws IOException;
 
     /**
+     * Refreshes with delete execution engine support. Applies parent deletes
+     * between addIndexes and reader open.
+     */
+    default RefreshResult refresh(RefreshInput refreshInput, DeleteExecutionEngine<?> deleteExecutionEngine) throws IOException {
+        return refresh(refreshInput);
+    }
+
+    /**
      * Returns the next writer generation number to be used when creating a new writer.
      * Each writer is associated with a monotonically increasing generation number
      * that uniquely identifies it within this engine's lifecycle.
