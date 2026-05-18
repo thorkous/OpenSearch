@@ -3636,4 +3636,31 @@ public class DocumentParserTests extends MapperServiceTestCase {
         assertThat(doc.getDocumentInput(), sameInstance(mockInput));
         assertNotNull(doc.rootDoc().getField("obj.inner"));
     }
+
+    private static class TestDocumentInput implements DocumentInput<Map<String, Object>> {
+        private final Map<String, Object> fields = new HashMap<>();
+
+        @Override
+        public Map<String, Object> getFinalInput() {
+            return Collections.unmodifiableMap(fields);
+        }
+
+        @Override
+        public void addField(MappedFieldType fieldType, Object value) {
+            fields.put(fieldType != null ? fieldType.name() : "field_" + fields.size(), value);
+        }
+
+        @Override
+        public void setRowId(String rowIdFieldName, long rowId) {
+            fields.put(rowIdFieldName, rowId);
+        }
+
+        @Override
+        public long getFieldCount(String fieldName) {
+            return fields.containsKey(fieldName) ? 1 : 0;
+        }
+
+        @Override
+        public void close() {}
+    }
 }

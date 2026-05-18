@@ -24,6 +24,8 @@ import org.opensearch.index.engine.dataformat.Writer;
 import org.opensearch.index.engine.dataformat.WriterConfig;
 import org.opensearch.index.engine.exec.PrimaryTermFieldType;
 import org.opensearch.index.mapper.IdFieldMapper;
+import org.opensearch.index.engine.exec.PrimaryTermFieldType;
+import org.opensearch.index.mapper.IdFieldMapper;
 import org.opensearch.index.mapper.KeywordFieldMapper;
 import org.opensearch.index.mapper.MappedFieldType;
 import org.opensearch.index.mapper.MapperService;
@@ -47,6 +49,10 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+
+import static org.opensearch.parquet.engine.ParquetDataFormatAwareEngineTests.ID_FIELD;
+import static org.opensearch.parquet.engine.ParquetDataFormatAwareEngineTests.SEQ_NO_FIELD;
+import static org.opensearch.parquet.engine.ParquetDataFormatAwareEngineTests.VERSION_FIELD;
 
 import static org.opensearch.parquet.engine.ParquetDataFormatAwareEngineTests.ID_FIELD;
 import static org.opensearch.parquet.engine.ParquetDataFormatAwareEngineTests.SEQ_NO_FIELD;

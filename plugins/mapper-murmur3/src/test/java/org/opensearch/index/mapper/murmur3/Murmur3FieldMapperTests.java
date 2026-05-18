@@ -154,4 +154,33 @@ public class Murmur3FieldMapperTests extends MapperTestCase {
         long hash2 = MurmurHash3.hash128(bytes2.bytes, bytes2.offset, bytes2.length, 0, new MurmurHash3.Hash128()).h1;
         assertEquals("Hash should be consistent for same input", hash, hash2);
     }
+
+    private static class TestDocumentInput implements DocumentInput<Object> {
+        private final List<Map.Entry<MappedFieldType, Object>> capturedFields = new ArrayList<>();
+
+        @Override
+        public Object getFinalInput() {
+            return null;
+        }
+
+        @Override
+        public void addField(MappedFieldType fieldType, Object value) {
+            capturedFields.add(Map.entry(fieldType, value));
+        }
+
+        @Override
+        public void setRowId(String rowIdFieldName, long rowId) {}
+
+        @Override
+        public long getFieldCount(String fieldName) {
+            return 0;
+        }
+
+        @Override
+        public void close() {}
+
+        public List<Map.Entry<MappedFieldType, Object>> getCapturedFields() {
+            return capturedFields;
+        }
+    }
 }

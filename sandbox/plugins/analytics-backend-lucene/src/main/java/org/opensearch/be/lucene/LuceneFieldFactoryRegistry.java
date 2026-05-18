@@ -36,15 +36,15 @@ public final class LuceneFieldFactoryRegistry {
 
     // ── Default factories ──
     private static final LuceneFieldFactory TEXT_FACTORY = (doc, ft, value, lft) -> {
-        doc.add(new Field(ft.name(), value.toString(), lft));
+        doc.add(new Field(ft.name(), value.toString(), TextFieldMapper.Defaults.FIELD_TYPE));
     };
 
     private static final LuceneFieldFactory KEYWORD_FACTORY = (doc, ft, value, lft) -> {
-        doc.add(new Field(ft.name(), value.toString(), lft));
+        doc.add(new Field(ft.name(), value.toString(), KeywordFieldMapper.Defaults.FIELD_TYPE));
     };
 
     private static final LuceneFieldFactory MATCH_ONLY_TEXT_FACTORY = (doc, ft, value, lft) -> {
-        doc.add(new Field(ft.name(), value.toString(), lft));
+        doc.add(new Field(ft.name(), value.toString(), TextFieldMapper.Defaults.FIELD_TYPE));
     };
 
     private static final LuceneFieldFactory ID_FIELD_FACTORY = (doc, ft, value, lft) -> {

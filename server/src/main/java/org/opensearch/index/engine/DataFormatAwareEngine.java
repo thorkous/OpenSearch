@@ -64,6 +64,7 @@ import org.opensearch.index.engine.exec.commit.Committer;
 import org.opensearch.index.engine.exec.commit.CommitterConfig;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshotManager;
+import org.opensearch.index.get.DocumentLookupResult;
 import org.opensearch.index.mapper.DocumentMapperForType;
 import org.opensearch.index.mapper.IdFieldMapper;
 import org.opensearch.index.mapper.ParsedDocument;
@@ -87,6 +88,7 @@ import org.opensearch.index.translog.TranslogManager;
 import org.opensearch.index.translog.TranslogOperationHelper;
 import org.opensearch.index.translog.listener.TranslogEventListener;
 import org.opensearch.indices.pollingingest.PollingIngestStats;
+import org.opensearch.plugins.DocumentLookupProvider;
 import org.opensearch.search.suggest.completion.CompletionStats;
 
 import java.io.Closeable;
@@ -149,6 +151,9 @@ public class DataFormatAwareEngine implements Indexer {
     private final Committer committer;
     private final List<ReferenceManager.RefreshListener> refreshListeners;
 
+    @Nullable
+    private final DocumentLookupProvider documentLookupProvider;
+
     // Translog for durability and recovery
     private final TranslogManager translogManager;
 
@@ -198,16 +203,27 @@ public class DataFormatAwareEngine implements Indexer {
     private final String historyUUID;
 
     /**
-     * Constructs a DataFormatBasedEngine.
+     * Constructs a DataFormatBasedEngine without a get-by-id plugin.
      *
      * @param engineConfig the engine configuration
      */
     public DataFormatAwareEngine(EngineConfig engineConfig) {
+        this(engineConfig, null);
+    }
+
+    /**
+     * Constructs a DataFormatBasedEngine.
+     *
+     * @param engineConfig   the engine configuration
+     * @param documentLookupProvider  the optional plugin powering {@link #getById(Engine.Get)}
+     */
+    public DataFormatAwareEngine(EngineConfig engineConfig, @Nullable DocumentLookupProvider documentLookupProvider) {
         this.logger = Loggers.getLogger(DataFormatAwareEngine.class, engineConfig.getShardId());
         this.engineConfig = engineConfig;
         this.shardId = engineConfig.getShardId();
         this.store = engineConfig.getStore();
         this.throttle = new IndexingThrottler();
+        this.documentLookupProvider = documentLookupProvider;
 
         List<ReferenceManager.RefreshListener> refreshListeners = new ArrayList<>();
         if (engineConfig.getInternalRefreshListener() != null) {
@@ -573,6 +589,7 @@ public class DataFormatAwareEngine implements Indexer {
         );
         try {
             currentWriter = lockedWriter.get();
+
             currentWriter.updateMappingVersion(mappingVersion);
             // Writer pool must never return null — it creates on demand via the supplier
             assert index.seqNo() >= 0 : "seqNo must be assigned before writing but was: " + index.seqNo();
@@ -1349,6 +1366,22 @@ public class DataFormatAwareEngine implements Indexer {
     @Override
     public GatedCloseable<CatalogSnapshot> acquireSnapshot() {
         return catalogSnapshotManager.acquireSnapshot();
+    }
+
+    /**
+     * Delegates get-by-id to the installed {@link DocumentLookupProvider}, acquiring a
+     * per-format reader on the current snapshot and passing it to the plugin.
+     * Throws {@link UnsupportedOperationException} if no plugin is wired.
+     */
+    @Override
+    public DocumentLookupResult getById(Engine.Get get) throws IOException {
+        ensureOpen();
+        if (documentLookupProvider == null) {
+            throw new UnsupportedOperationException("getById not supported: no DocumentLookupProvider installed");
+        }
+        try (GatedCloseable<Reader> readerRef = acquireReader()) {
+            return documentLookupProvider.getById(get, readerRef.get(), shardId.getIndexName());
+        }
     }
 
     @Override

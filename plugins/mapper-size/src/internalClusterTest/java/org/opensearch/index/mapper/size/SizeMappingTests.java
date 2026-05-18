@@ -154,4 +154,33 @@ public class SizeMappingTests extends OpenSearchSingleNodeTestCase {
         boolean found = docInput.getCapturedFields().stream().anyMatch(e -> e.getKey().name().equals("_size"));
         assertTrue("Expected _size field captured via postParse pluggable format path", found);
     }
+
+    private static class TestDocumentInput implements DocumentInput<Object> {
+        private final List<Map.Entry<MappedFieldType, Object>> capturedFields = new ArrayList<>();
+
+        @Override
+        public Object getFinalInput() {
+            return null;
+        }
+
+        @Override
+        public void addField(MappedFieldType fieldType, Object value) {
+            capturedFields.add(Map.entry(fieldType, value));
+        }
+
+        @Override
+        public void setRowId(String rowIdFieldName, long rowId) {}
+
+        @Override
+        public long getFieldCount(String fieldName) {
+            return 0;
+        }
+
+        @Override
+        public void close() {}
+
+        public List<Map.Entry<MappedFieldType, Object>> getCapturedFields() {
+            return capturedFields;
+        }
+    }
 }

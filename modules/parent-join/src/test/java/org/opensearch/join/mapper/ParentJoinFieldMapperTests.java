@@ -737,6 +737,43 @@ public class ParentJoinFieldMapperTests extends OpenSearchSingleNodeTestCase {
             )
         );
         assertEquals(UnsupportedOperationException.class, t.getCause().getClass());
+        // ParentIdFieldMapper writes the parent ref via documentInput (parseCreateFieldForPluggableFormat)
+        assertTrue(
+            "Expected join_field#parent captured via ParentIdFieldMapper",
+            docInput.getCapturedFields().stream().anyMatch(e -> e.getKey().name().equals("join_field#parent"))
+        );
+    }
+
+    /**
+     * Simple DocumentInput that captures addField calls for assertion.
+     */
+    private static class TestDocumentInput implements DocumentInput<Object> {
+        private final List<Map.Entry<MappedFieldType, Object>> capturedFields = new ArrayList<>();
+
+        @Override
+        public Object getFinalInput() {
+            return null;
+        }
+
+        @Override
+        public void addField(MappedFieldType fieldType, Object value) {
+            capturedFields.add(Map.entry(fieldType, value));
+        }
+
+        @Override
+        public void setRowId(String rowIdFieldName, long rowId) {}
+
+        @Override
+        public long getFieldCount(String fieldName) {
+            return 0;
+        }
+
+        @Override
+        public void close() {}
+
+        public List<Map.Entry<MappedFieldType, Object>> getCapturedFields() {
+            return capturedFields;
+        }
     }
 
     @LockFeatureFlag(FeatureFlags.PLUGGABLE_DATAFORMAT_EXPERIMENTAL_FLAG)
