@@ -294,7 +294,7 @@ public class GetServiceTests extends OpenSearchTestCase {
         }
 
         @Override
-        public Map<String, Object> executeSingleRow(String parquetDir, String parquetFile, String tableName, long rowId) {
+        public Map<String, Object> executeSingleRow(String parquetDir, String parquetFile, String tableName, long rowId, long writerGeneration) {
             this.lastRowId = rowId;
             if (row == null) return null;
             if (row.isEmpty()) return new HashMap<>();

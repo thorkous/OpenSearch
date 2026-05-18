@@ -43,6 +43,7 @@ import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.dataformat.DataFormatRegistry;
 import org.opensearch.index.engine.dataformat.DocumentInput;
 import org.opensearch.index.engine.exec.IndexReaderProvider;
+import org.opensearch.index.engine.exec.MonoFileWriterSet;
 import org.opensearch.index.engine.exec.Segment;
 import org.opensearch.index.engine.exec.WriterFileSet;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
@@ -58,6 +59,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -178,7 +180,7 @@ public class GetService {
         WriterFileSet parquetSet = findParquetSet(snapshot, writerGeneration);
 
         String parquetFile = parquetSet.files().iterator().next();
-        Map<String, Object> row = executor.executeSingleRow(parquetSet.directory(), parquetFile, indexName, rowId);
+        Map<String, Object> row = executor.executeSingleRow(parquetSet.directory(), parquetFile, indexName, rowId, writerGeneration);
         if (row == null) {
             // Lucene hit but empty parquet fetch — treat as a rare race (e.g., parquet not yet
             // visible to the native reader) rather than an error.
@@ -264,7 +266,20 @@ public class GetService {
             } catch (IllegalArgumentException e) {
                 throw new IllegalStateException("Lucene data format not registered — get-by-id requires the analytics-backend-lucene plugin", e);
             }
-            return reader.getReader(luceneFormat, DirectoryReader.class);
+            Object readerObj = reader.getReader(luceneFormat, Object.class);
+            if (readerObj instanceof DirectoryReader dr) {
+                return dr;
+            }
+            // LuceneReader is a record in analytics-backend-lucene with a directoryReader() accessor.
+            // Use reflection to avoid compile-time dep on sibling plugin.
+            try {
+                var method = readerObj.getClass().getMethod("directoryReader");
+                return (DirectoryReader) method.invoke(readerObj);
+            } catch (Exception e) {
+                throw new IllegalStateException(
+                    "Reader for format [lucene] is " + readerObj.getClass().getName()
+                        + ", cannot extract DirectoryReader", e);
+            }
         }
     }
 
@@ -300,7 +315,7 @@ public class GetService {
      * zero-column projection.
      */
     interface NativeExecutor {
-        Map<String, Object> executeSingleRow(String parquetDir, String parquetFile, String tableName, long rowId) throws IOException;
+        Map<String, Object> executeSingleRow(String parquetDir, String parquetFile, String tableName, long rowId, long writerGeneration) throws IOException;
     }
 
     /**
@@ -319,17 +334,18 @@ public class GetService {
         }
 
         @Override
-        public Map<String, Object> executeSingleRow(String parquetDir, String parquetFile, String tableName, long rowId)
+        public Map<String, Object> executeSingleRow(String parquetDir, String parquetFile, String tableName, long rowId, long writerGeneration)
             throws IOException {
             long runtimePtr = dfPlugin.getDataFusionService().getNativeRuntime().get();
             // ReaderHandle registers the native pointer with NativeHandle so downstream
             // validatePointer() calls in executeQueryAsync() find it in the live set.
-            try (ReaderHandle readerHandle = new ReaderHandle(parquetDir, new String[] { parquetFile })) {
+            MonoFileWriterSet segment = MonoFileWriterSet.of(parquetDir, writerGeneration, parquetFile, 0L);
+            try (ReaderHandle readerHandle = new ReaderHandle(parquetDir, List.of(segment), null)) {
                 long readerPtr = readerHandle.getPointer();
                 // Let the native planner discover the parquet schema from the file footer and
                 // project every column — hand-rolling a Substrait ReadRel with an empty
                 // base_schema collapses projection to zero columns.
-                String sql = "SELECT * FROM " + tableName + " LIMIT 1 OFFSET " + rowId;
+                String sql = "SELECT * FROM \"" + tableName + "\" LIMIT 1 OFFSET " + rowId;
                 byte[] substraitPlan = NativeBridge.sqlToSubstrait(readerPtr, tableName, sql, runtimePtr);
                 long streamPtr;
                 CompletableFuture<Long> future = new CompletableFuture<>();

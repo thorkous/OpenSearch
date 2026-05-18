@@ -99,12 +99,12 @@ public class AverageNativeMemoryUsageTracker extends AbstractAverageUsageTracker
 
         long effectiveNativeMemory = effectiveNativeMemorySupplier.getAsLong();
         if (effectiveNativeMemory <= 0L) {
-            LOGGER.warn(
-                "Native memory poll: rssAnon={} heapCommitted={} nativeUsed={} effectiveNativeMemory=0 -> 0%",
-                rssAnon,
-                heapCommitted,
-                nativeUsed
-            );
+//            LOGGER.warn(
+//                "Native memory poll: rssAnon={} heapCommitted={} nativeUsed={} effectiveNativeMemory=0 -> 0%",
+//                rssAnon,
+//                heapCommitted,
+//                nativeUsed
+//            );
             return 0L;
         }
 

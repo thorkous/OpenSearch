@@ -14,6 +14,7 @@ import org.apache.lucene.index.IndexCommit;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.ReferenceManager;
 import org.apache.lucene.store.AlreadyClosedException;
+import org.apache.lucene.util.BytesRef;
 import org.opensearch.OpenSearchException;
 import org.opensearch.common.Booleans;
 import org.opensearch.common.Nullable;
@@ -23,6 +24,8 @@ import org.opensearch.common.concurrent.GatedCloseable;
 import org.opensearch.common.concurrent.GatedConditionalCloseable;
 import org.opensearch.common.lease.Releasable;
 import org.opensearch.common.logging.Loggers;
+import org.opensearch.common.lucene.uid.Versions;
+import org.opensearch.common.metrics.CounterMetric;
 import org.opensearch.common.queue.DefaultLockableHolder;
 import org.opensearch.common.queue.LockablePool;
 import org.opensearch.common.unit.TimeValue;
@@ -188,6 +191,9 @@ public class DataFormatAwareEngine implements Indexer {
 
     // Merge
     private final MergeScheduler mergeScheduler;
+    private final LiveVersionMap versionMap;
+    private final CounterMetric numVersionLookups = new CounterMetric();
+    private final CounterMetric numIndexVersionsLookups = new CounterMetric();
 
     /**
      * System property to enable or disable pluggable dataformat merge operations.
@@ -224,6 +230,7 @@ public class DataFormatAwareEngine implements Indexer {
         this.store = engineConfig.getStore();
         this.throttle = new IndexingThrottler();
         this.documentLookupProvider = documentLookupProvider;
+        this.versionMap = new LiveVersionMap();
 
         List<ReferenceManager.RefreshListener> refreshListeners = new ArrayList<>();
         if (engineConfig.getInternalRefreshListener() != null) {
@@ -357,13 +364,13 @@ public class DataFormatAwareEngine implements Indexer {
             this.indexingStrategyPlanner = new IndexingStrategyPlanner(
                 engineConfig.getIndexSettings(),
                 engineConfig.getShardId(),
-                new LiveVersionMap(),
+                this.versionMap,
                 maxUnsafeAutoIdTimestamp::get,
                 () -> 0L,
                 localCheckpointTracker::getProcessedCheckpoint,
                 this::hasBeenProcessedBefore,
                 op -> OpVsEngineDocStatus.OP_NEWER,
-                (a, b) -> null,
+                this::resolveDocVersion,
                 this::updateAutoIdTimestamp,
                 (a, b) -> null
             );
@@ -509,9 +516,10 @@ public class DataFormatAwareEngine implements Indexer {
         assert (index.origin() == Engine.Operation.Origin.PRIMARY || index.origin() == Engine.Operation.Origin.LOCAL_TRANSLOG_RECOVERY)
             : "DataFormatAwareEngine only supports PRIMARY origin but got: " + index.origin();
         final boolean doThrottle = index.origin().isRecovery() == false;
-        try (ReleasableLock ignored = readLock.acquire()) {
+        try (ReleasableLock releasableLock = readLock.acquire()) {
             ensureOpen();
-            try (Releasable indexThrottle = doThrottle ? throttle.acquireThrottle() : () -> {}) {
+            try (Releasable ignored = versionMap.acquireLock(index.uid().bytes());
+                 Releasable indexThrottle = doThrottle ? throttle.acquireThrottle() : () -> {}) {
                 lastWriteNanos = index.startTime();
                 final IndexingStrategy plan;
                 if (index.origin() == Engine.Operation.Origin.PRIMARY) {
@@ -1520,6 +1528,72 @@ public class DataFormatAwareEngine implements Indexer {
             }
             throw ioException;
         }
+    }
+
+    protected VersionValue resolveDocVersion(final Engine.Operation op, boolean loadSeqNo) throws IOException {
+        assert incrementVersionLookup(); // used for asserting in tests
+        logger.info("[RESOLVE] id=[{}] opType=[{}]", op.id(), op.operationType());
+        VersionValue versionValue = getVersionFromMap(op.uid().bytes());
+        if (versionValue == null) {
+            logger.info("[RESOLVE] id=[{}] versionMap=null, falling through to tier-2 getById", op.id());
+            assert incrementIndexVersionLookup(); // used for asserting in tests
+            DocumentLookupResult lookupResult = getById(new Engine.Get(false, false, op.id(), op.uid()));
+            logger.info(
+                "[RESOLVE] id=[{}] getById result: version=[{}] seqNo=[{}] primaryTerm=[{}] exists=[{}]",
+                op.id(),
+                lookupResult.version(),
+                lookupResult.seqNo(),
+                lookupResult.primaryTerm(),
+                lookupResult.exists()
+            );
+            if (lookupResult.version() != Versions.NOT_FOUND) {
+                logger.info("[RESOLVE] id=[{}] tier-2 HIT, creating IndexVersionValue v=[{}] seqNo=[{}] term=[{}]",
+                    op.id(), lookupResult.version(), lookupResult.seqNo(), lookupResult.primaryTerm());
+                versionValue = new IndexVersionValue(null, lookupResult.version(), lookupResult.seqNo(), lookupResult.primaryTerm());
+            }
+        } else {
+            logger.info("[RESOLVE] id=[{}] versionMap hit: class=[{}] version=[{}] seqNo=[{}] primaryTerm=[{}]",
+                op.id(), versionValue.getClass().getSimpleName(), versionValue.version, versionValue.seqNo, versionValue.term);
+            if (engineConfig.isEnableGcDeletes()
+                && versionValue.isDelete()
+                && (engineConfig.getThreadPool().relativeTimeInMillis() - ((DeleteVersionValue) versionValue).time) > getGcDeletesInMillis()) {
+                logger.info("[RESOLVE] id=[{}] GC'd stale DeleteVersionValue", op.id());
+                versionValue = null;
+            }
+        }
+
+        logger.info("[RESOLVE] id=[{}] returning: {}", op.id(), versionValue == null ? "null" : versionValue.getClass().getSimpleName() + " v=" + versionValue.version);
+        //TODO: Add CAS support here by not allowing criteria update.
+        return versionValue;
+    }
+
+    long getGcDeletesInMillis() {
+        return engineConfig.getIndexSettings().getGcDeletesInMillis();
+    }
+
+    private boolean incrementVersionLookup() { // only used by asserts
+        numVersionLookups.inc();
+        return true;
+    }
+
+    private boolean incrementIndexVersionLookup() {
+        numIndexVersionsLookups.inc();
+        return true;
+    }
+
+    private VersionValue getVersionFromMap(BytesRef id) {
+        if (versionMap.isUnsafe()) {
+            synchronized (versionMap) {
+                // we are switching from an unsafe map to a safe map. This might happen concurrently
+                // but we only need to do this once since the last operation per ID is to add to the version
+                // map so once we pass this point we can safely lookup from the version map.
+                if (versionMap.isUnsafe()) {
+                    refresh("unsafe_version_map");
+                }
+                versionMap.enforceSafeAccess();
+            }
+        }
+        return versionMap.getUnderLock(id);
     }
 
     private void awaitPendingClose() {
