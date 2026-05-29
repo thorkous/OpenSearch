@@ -30,7 +30,6 @@ import org.opensearch.remotestore.RemoteStoreBaseIntegTestCase;
 import org.opensearch.test.OpenSearchIntegTestCase;
 
 import java.util.Collection;
-import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -96,7 +95,7 @@ public abstract class DataFormatAwareReadonlyEngineBaseIT extends RemoteStoreBas
             .put("index.pluggable.dataformat.enabled", true)
             .put("index.pluggable.dataformat", "composite")
             .put("index.composite.primary_data_format", "parquet")
-            .putList("index.composite.secondary_data_formats", List.of())
+            .putList("index.composite.secondary_data_formats", DataFormatAwareITUtils.DEFAULT_SECONDARY_FORMATS)
             .build();
     }
 

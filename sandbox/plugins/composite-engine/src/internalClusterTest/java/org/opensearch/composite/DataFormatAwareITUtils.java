@@ -24,6 +24,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -45,6 +46,13 @@ import static org.junit.Assert.assertTrue;
  * </ul>
  */
 final class DataFormatAwareITUtils {
+
+    /**
+     * Default secondary data formats for composite indices in integration tests.
+     * Lucene is required as secondary for _id resolution via getById.
+     * Change to List.of() when Lucene is no longer mandatory.
+     */
+    static final List<String> DEFAULT_SECONDARY_FORMATS = List.of("lucene");
 
     private DataFormatAwareITUtils() {}
 

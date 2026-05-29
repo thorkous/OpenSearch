@@ -47,6 +47,7 @@ import org.opensearch.index.engine.exec.WriterFileSet;
 import org.opensearch.index.engine.exec.commit.Committer;
 import org.opensearch.index.engine.exec.commit.CommitterFactory;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
+import org.opensearch.index.get.DocumentLookupResult;
 import org.opensearch.index.mapper.DocumentMapper;
 import org.opensearch.index.mapper.IdFieldMapper;
 import org.opensearch.index.mapper.MapperService;
@@ -60,6 +61,7 @@ import org.opensearch.index.store.FsDirectoryFactory;
 import org.opensearch.index.store.Store;
 import org.opensearch.index.translog.Translog;
 import org.opensearch.index.translog.TranslogConfig;
+import org.opensearch.plugins.DocumentLookupProvider;
 import org.opensearch.plugins.PluginsService;
 import org.opensearch.plugins.SearchBackEndPlugin;
 import org.opensearch.test.DummyShardLock;
@@ -89,6 +91,8 @@ import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -157,6 +161,10 @@ public class DataFormatAwareEngineTests extends OpenSearchTestCase {
      * expects to find: translog UUID, seq-no info, history UUID, etc.
      */
     private void bootstrapStoreWithMetadata(Store store, String translogUUID) throws IOException {
+        bootstrapStoreWithMetadata(store, translogUUID, SequenceNumbers.NO_OPS_PERFORMED);
+    }
+
+    private void bootstrapStoreWithMetadata(Store store, String translogUUID, long maxSeqNo) throws IOException {
         try (
             IndexWriter writer = new IndexWriter(
                 store.directory(),
@@ -167,7 +175,7 @@ public class DataFormatAwareEngineTests extends OpenSearchTestCase {
             Map<String, String> commitData = new HashMap<>();
             commitData.put(Translog.TRANSLOG_UUID_KEY, translogUUID);
             commitData.put(SequenceNumbers.LOCAL_CHECKPOINT_KEY, Long.toString(SequenceNumbers.NO_OPS_PERFORMED));
-            commitData.put(SequenceNumbers.MAX_SEQ_NO, Long.toString(SequenceNumbers.NO_OPS_PERFORMED));
+            commitData.put(SequenceNumbers.MAX_SEQ_NO, Long.toString(maxSeqNo));
             commitData.put(Engine.MAX_UNSAFE_AUTO_ID_TIMESTAMP_COMMIT_ID, "-1");
             commitData.put(Engine.HISTORY_UUID_KEY, UUID.randomUUID().toString());
             writer.setLiveCommitData(commitData.entrySet());
@@ -3219,6 +3227,293 @@ public class DataFormatAwareEngineTests extends OpenSearchTestCase {
             int secondFill = engine.fillSeqNoGaps(primaryTerm.get());
             assertEquals("no further NoOps on second call", 0, secondFill);
             assertEquals(5L, engine.getProcessedLocalCheckpoint());
+        }
+    }
+
+    private DataFormatAwareEngine createDFAEngineWithLookupProvider(Store store, Path translogPath, DocumentLookupProvider provider)
+        throws IOException {
+        String uuid = Translog.createEmptyTranslog(translogPath, SequenceNumbers.NO_OPS_PERFORMED, shardId, primaryTerm.get());
+        bootstrapStoreWithMetadata(store, uuid);
+        return new DataFormatAwareEngine(buildDFAEngineConfig(store, translogPath), provider);
+    }
+
+    private Engine.Get realtimeGet(String id) {
+        return new Engine.Get(true, true, id, new Term(IdFieldMapper.NAME, Uid.encodeId(id)));
+    }
+
+    private DocumentLookupProvider mockLookupProvider() throws IOException {
+        DocumentLookupProvider provider = mock(DocumentLookupProvider.class);
+        when(provider.getById(any(), any(), any())).thenReturn(DocumentLookupResult.notFound(""));
+        return provider;
+    }
+
+    public void testGetMaxSeqNoOfUpdatesOrDeletes() throws IOException {
+        try (DataFormatAwareEngine engine = createDFAEngine(store, createTempDir())) {
+            assertThat(engine.getMaxSeqNoOfUpdatesOrDeletes(), equalTo(SequenceNumbers.NO_OPS_PERFORMED));
+        }
+    }
+
+    public void testCurrentOngoingRefreshCheckpoint() throws IOException {
+        try (DataFormatAwareEngine engine = createDFAEngine(store, createTempDir())) {
+            assertThat(engine.currentOngoingRefreshCheckpoint(), equalTo(SequenceNumbers.NO_OPS_PERFORMED));
+            for (int i = 0; i < 5; i++) {
+                engine.index(indexOp(createParsedDocWithInput(Integer.toString(i), null)));
+            }
+            engine.refresh("test");
+            assertThat(engine.currentOngoingRefreshCheckpoint(), greaterThanOrEqualTo(0L));
+        }
+    }
+
+    public void testGetByIdThrowsWhenNoProvider() throws IOException {
+        try (DataFormatAwareEngine engine = createDFAEngine(store, createTempDir())) {
+            Engine.Get get = realtimeGet("1");
+            expectThrows(UnsupportedOperationException.class, () -> engine.getById(get));
+        }
+    }
+
+    public void testGetByIdReturnsNotFoundWhenEmptyCatalog() throws IOException {
+        DocumentLookupProvider provider = mockLookupProvider();
+        try (DataFormatAwareEngine engine = createDFAEngineWithLookupProvider(store, createTempDir(), provider)) {
+            Engine.Get get = realtimeGet("1");
+            DocumentLookupResult result = engine.getById(get);
+            assertFalse("should be not found on empty catalog", result.exists());
+        }
+    }
+
+    public void testGetByIdReturnsDocFromTranslog() throws IOException {
+        DocumentLookupProvider provider = mockLookupProvider();
+        try (DataFormatAwareEngine engine = createDFAEngineWithLookupProvider(store, createTempDir(), provider)) {
+            engine.index(indexOp(createParsedDocWithInput("1", null)));
+            // Realtime get with readFromTranslog finds it in translog via versionMap location
+            Engine.Get get = realtimeGet("1");
+            DocumentLookupResult result = engine.getById(get);
+            assertTrue("doc should be found from translog", result.exists());
+            assertThat(result.seqNo(), equalTo(0L));
+        }
+    }
+
+    public void testGetByIdReturnsDocFromParquetAfterRefresh() throws IOException {
+        DocumentLookupProvider provider = mock(DocumentLookupProvider.class);
+        when(provider.getById(any(), any(), any())).thenReturn(new DocumentLookupResult("1", 1L, true, null, 0L, 1L, Map.of(), Map.of()));
+        try (DataFormatAwareEngine engine = createDFAEngineWithLookupProvider(store, createTempDir(), provider)) {
+            engine.index(indexOp(createParsedDocWithInput("1", null)));
+            engine.refresh("test");
+            // Non-realtime get falls through to provider
+            Engine.Get get = new Engine.Get(false, false, "1", new Term(IdFieldMapper.NAME, Uid.encodeId("1")));
+            DocumentLookupResult result = engine.getById(get);
+            assertTrue("doc should be found from parquet", result.exists());
+        }
+    }
+
+    /**
+     * Covers resolveDocVersion falling back to DocumentLookupProvider when versionMap miss.
+     * Also covers incrementIndexVersionLookup (called inside resolveDocVersion on provider path).
+     */
+    public void testResolveDocVersionFallsBackToProvider() throws IOException {
+        DocumentLookupProvider provider = mock(DocumentLookupProvider.class);
+        when(provider.getById(any(), any(), any())).thenReturn(new DocumentLookupResult("1", 5L, true, null, 3L, 1L, Map.of(), Map.of()));
+        try (DataFormatAwareEngine engine = createDFAEngineWithLookupProvider(store, createTempDir(), provider)) {
+            engine.index(indexOp(createParsedDocWithInput("1", null)));
+            engine.refresh("test");
+            // Re-index same doc — resolveDocVersion misses versionMap (cleared by refresh rotation),
+            // falls back to provider which returns version=5. MATCH_ANY accepts.
+            Engine.IndexResult result = engine.index(indexOp(createParsedDocWithInput("1", null)));
+            assertThat(result.getResultType(), equalTo(Engine.Result.Type.SUCCESS));
+            assertThat(result.getSeqNo(), equalTo(1L));
+        }
+    }
+
+    /**
+     * Covers restoreVersionMapAndCheckpointTracker + compareOpToVersionMapOnSeqNo.
+     * The provider returns docs for seqNos 0-3 so checkpoint advances contiguously.
+     */
+    public void testRestoreVersionMapAndCheckpointTracker() throws IOException {
+        Path translogPath = createTempDir();
+        DocumentLookupProvider provider = mock(DocumentLookupProvider.class);
+        when(provider.getDocsBySeqNoRange(anyLong(), any(), any())).thenReturn(
+            List.of(
+                new DocumentLookupResult("a", 1L, true, null, 0L, 1L, Map.of(), Map.of()),
+                new DocumentLookupResult("b", 1L, true, null, 1L, 1L, Map.of(), Map.of()),
+                new DocumentLookupResult("c", 1L, true, null, 2L, 1L, Map.of(), Map.of()),
+                new DocumentLookupResult("d", 1L, true, null, 3L, 1L, Map.of(), Map.of())
+            )
+        );
+        when(provider.getById(any(), any(), any())).thenReturn(DocumentLookupResult.notFound("x"));
+
+        // Bootstrap with maxSeqNo=3, localCheckpoint=-1 (triggers restore)
+        String uuid = Translog.createEmptyTranslog(translogPath, SequenceNumbers.NO_OPS_PERFORMED, shardId, primaryTerm.get());
+        bootstrapStoreWithMetadata(store, uuid, 3L);
+
+        EngineConfig config = buildDFAEngineConfig(store, translogPath);
+        try (DataFormatAwareEngine engine = new DataFormatAwareEngine(config, provider)) {
+            // All seqNos 0-3 marked → checkpoint advances to 3
+            assertThat(engine.getProcessedLocalCheckpoint(), equalTo(3L));
+        }
+    }
+
+    /**
+     * Covers compareOpToVersionMapOnSeqNo returning OP_STALE_OR_EQUAL.
+     * Provider returns entries for id "x" at seqNo=2 and seqNo=5, plus a duplicate at seqNo=5.
+     * The stale entry (seqNo=2) is overwritten by OP_NEWER, the duplicate (same seqNo=5) is skipped.
+     */
+    public void testRestoreVersionMapSkipsStaleEntries() throws IOException {
+        Path translogPath = createTempDir();
+        DocumentLookupProvider provider = mock(DocumentLookupProvider.class);
+        // Return all seqNos 0-5 so checkpoint advances, with duplicate id "x" at seqNo 2 and 5
+        when(provider.getDocsBySeqNoRange(anyLong(), any(), any())).thenReturn(
+            List.of(
+                new DocumentLookupResult("a", 1L, true, null, 0L, 1L, Map.of(), Map.of()),
+                new DocumentLookupResult("b", 1L, true, null, 1L, 1L, Map.of(), Map.of()),
+                new DocumentLookupResult("x", 1L, true, null, 2L, 1L, Map.of(), Map.of()),
+                new DocumentLookupResult("c", 1L, true, null, 3L, 1L, Map.of(), Map.of()),
+                new DocumentLookupResult("d", 1L, true, null, 4L, 1L, Map.of(), Map.of()),
+                new DocumentLookupResult("x", 2L, true, null, 5L, 1L, Map.of(), Map.of()),
+                // Duplicate id "x" at same seqNo=5 → hits seqNo == versionValue.seqNo → OP_STALE_OR_EQUAL
+                new DocumentLookupResult("x", 2L, true, null, 5L, 1L, Map.of(), Map.of())
+            )
+        );
+        when(provider.getById(any(), any(), any())).thenReturn(DocumentLookupResult.notFound("x"));
+
+        String uuid = Translog.createEmptyTranslog(translogPath, SequenceNumbers.NO_OPS_PERFORMED, shardId, primaryTerm.get());
+        bootstrapStoreWithMetadata(store, uuid, 5L);
+
+        EngineConfig config = buildDFAEngineConfig(store, translogPath);
+        try (DataFormatAwareEngine engine = new DataFormatAwareEngine(config, provider)) {
+            // All seqNos 0-5 contiguous → checkpoint = 5
+            assertThat(engine.getProcessedLocalCheckpoint(), equalTo(5L));
+            // Index "x" again — should succeed (versionMap has version=2 from seqNo=5 entry)
+            Engine.IndexResult result = engine.index(indexOp(createParsedDocWithInput("x", null)));
+            assertThat(result.getResultType(), equalTo(Engine.Result.Type.SUCCESS));
+        }
+    }
+
+    public void testRestoreVersionMapThrowsOnIOException() throws IOException {
+        Path translogPath = createTempDir();
+        DocumentLookupProvider provider = mock(DocumentLookupProvider.class);
+        when(provider.getDocsBySeqNoRange(anyLong(), any(), any())).thenThrow(new IOException("simulated read failure"));
+
+        String uuid = Translog.createEmptyTranslog(translogPath, SequenceNumbers.NO_OPS_PERFORMED, shardId, primaryTerm.get());
+        bootstrapStoreWithMetadata(store, uuid, 3L);
+
+        EngineConfig config = buildDFAEngineConfig(store, translogPath);
+        EngineCreationFailureException ex = expectThrows(
+            EngineCreationFailureException.class,
+            () -> new DataFormatAwareEngine(config, provider)
+        );
+        assertThat(ex.getMessage(), containsString("failed to restore version map"));
+        assertThat(ex.getCause(), instanceOf(IOException.class));
+    }
+
+    /**
+     * Covers getVersionFromMap unsafe path: versionMap.isUnsafe() triggers refresh + enforceSafeAccess.
+     */
+    @SuppressForbidden(reason = "test needs reflective access to mark versionMap as unsafe")
+    public void testGetVersionFromMapUnsafePathTriggersRefresh() throws Exception {
+        DocumentLookupProvider provider = mockLookupProvider();
+        try (DataFormatAwareEngine engine = createDFAEngineWithLookupProvider(store, createTempDir(), provider)) {
+            engine.index(indexOp(createParsedDocWithInput("1", null)));
+
+            java.lang.reflect.Field vmField = DataFormatAwareEngine.class.getDeclaredField("versionMap");
+            vmField.setAccessible(true);
+            LiveVersionMap versionMap = (LiveVersionMap) vmField.get(engine);
+            java.lang.reflect.Field mapsField = LiveVersionMap.class.getDeclaredField("maps");
+            mapsField.setAccessible(true);
+            Object maps = mapsField.get(versionMap);
+            java.lang.reflect.Field currentField = maps.getClass().getDeclaredField("current");
+            currentField.setAccessible(true);
+            Object current = currentField.get(maps);
+            java.lang.reflect.Method markUnsafe = current.getClass().getDeclaredMethod("markAsUnsafe");
+            markUnsafe.setAccessible(true);
+            markUnsafe.invoke(current);
+
+            assertTrue("versionMap should be unsafe", versionMap.isUnsafe());
+
+            long genBefore;
+            try (GatedCloseable<CatalogSnapshot> ref = engine.acquireSnapshot()) {
+                genBefore = ref.get().getGeneration();
+            }
+
+            engine.getById(realtimeGet("1"));
+
+            long genAfter;
+            try (GatedCloseable<CatalogSnapshot> ref = engine.acquireSnapshot()) {
+                genAfter = ref.get().getGeneration();
+            }
+            assertThat("refresh should have been triggered by unsafe versionMap", genAfter, greaterThan(genBefore));
+            assertFalse("versionMap should be safe after refresh", versionMap.isUnsafe());
+        }
+    }
+
+    /**
+     * Covers getById paths: delete check, version conflict, seqNo/primaryTerm conflict.
+     * Uses reflection to inject a DeleteVersionValue into versionMap since engine.delete() is unsupported.
+     */
+    @SuppressForbidden(reason = "test needs reflective access to inject DeleteVersionValue into versionMap")
+    public void testGetByIdDeleteAndConflictPaths() throws Exception {
+        DocumentLookupProvider provider = mockLookupProvider();
+        try (DataFormatAwareEngine engine = createDFAEngineWithLookupProvider(store, createTempDir(), provider)) {
+            // Index a doc so versionMap has an IndexVersionValue
+            engine.index(indexOp(createParsedDocWithInput("1", null)));
+
+            // --- Path 1: versionValue.isDelete() ---
+            // Inject a DeleteVersionValue into versionMap via reflection
+            java.lang.reflect.Field vmField = DataFormatAwareEngine.class.getDeclaredField("versionMap");
+            vmField.setAccessible(true);
+            LiveVersionMap versionMap = (LiveVersionMap) vmField.get(engine);
+            org.apache.lucene.util.BytesRef uid = new Term(IdFieldMapper.NAME, Uid.encodeId("1")).bytes();
+            try (org.opensearch.common.lease.Releasable ignored = versionMap.acquireLock(uid)) {
+                versionMap.putDeleteUnderLock(uid, new DeleteVersionValue(2L, 1L, 1L, System.currentTimeMillis()));
+            }
+
+            Engine.Get getForDelete = realtimeGet("1");
+            DocumentLookupResult deleteResult = engine.getById(getForDelete);
+            assertFalse("deleted doc should return not found", deleteResult.exists());
+
+            // --- Path 2: version conflict for reads ---
+            // Put back an IndexVersionValue so we can test version conflict
+            try (org.opensearch.common.lease.Releasable ignored = versionMap.acquireLock(uid)) {
+                versionMap.putIndexUnderLock(uid, new IndexVersionValue(null, 5L, 0L, 1L));
+            }
+
+            Engine.Get getWithConflict = realtimeGet("1").version(3L).versionType(VersionType.EXTERNAL);
+            expectThrows(VersionConflictEngineException.class, () -> engine.getById(getWithConflict));
+
+            // --- Path 3: seqNo/primaryTerm conflict (seqNo matches, primaryTerm doesn't) ---
+            Engine.Get getWithSeqNoConflict = realtimeGet("1").setIfSeqNo(99L).setIfPrimaryTerm(1L);
+            expectThrows(VersionConflictEngineException.class, () -> engine.getById(getWithSeqNoConflict));
+
+            // --- Path 4: primaryTerm mismatch (seqNo matches but primaryTerm doesn't) ---
+            // versionMap has seqNo=0, primaryTerm=1 from the IndexVersionValue above
+            try (org.opensearch.common.lease.Releasable ignored = versionMap.acquireLock(uid)) {
+                versionMap.putIndexUnderLock(uid, new IndexVersionValue(null, 5L, 0L, 1L));
+            }
+            Engine.Get getWithPtConflict = realtimeGet("1").setIfSeqNo(0L).setIfPrimaryTerm(999L);
+            expectThrows(VersionConflictEngineException.class, () -> engine.getById(getWithPtConflict));
+
+            // --- Path 5: seqNo and primaryTerm both match — no conflict, falls through ---
+            Engine.Get getNoConflict = realtimeGet("1").setIfSeqNo(0L).setIfPrimaryTerm(1L);
+            DocumentLookupResult noConflictResult = engine.getById(getNoConflict);
+            assertNotNull("should not throw when seqNo and primaryTerm match", noConflictResult);
+
+            // --- Path 6: GC deletes in resolveDocVersion ---
+            // Inject an expired DeleteVersionValue (time far in the past) so gc_deletes nullifies it
+            try (org.opensearch.common.lease.Releasable ignored = versionMap.acquireLock(uid)) {
+                versionMap.putDeleteUnderLock(uid, new DeleteVersionValue(3L, 2L, 1L, 1L)); // time=1ms (epoch start, expired)
+            }
+            // Index same doc again — resolveDocVersion finds expired DeleteVersionValue, nullifies it,
+            // treats as new doc (version NOT_FOUND)
+            Engine.IndexResult gcResult = engine.index(indexOp(createParsedDocWithInput("1", null)));
+            assertThat(gcResult.getResultType(), equalTo(Engine.Result.Type.SUCCESS));
+
+            // --- Path 7: translog readOperation returns null (bogus location) ---
+            // Covers the negative path: if (operation != null) is false, falls through to refreshIfNeeded
+            Translog.Location bogusLocation = new Translog.Location(999L, 0L, 1);
+            try (org.opensearch.common.lease.Releasable ignored = versionMap.acquireLock(uid)) {
+                versionMap.putIndexUnderLock(uid, new IndexVersionValue(bogusLocation, 6L, 3L, 1L));
+            }
+            Engine.Get getWithBadTranslog = realtimeGet("1");
+            DocumentLookupResult translogNullResult = engine.getById(getWithBadTranslog);
+            assertNotNull("should fall through when translog returns null", translogNullResult);
         }
     }
 }

@@ -18,7 +18,6 @@ import org.opensearch.index.shard.IndexShard;
 import org.opensearch.indices.replication.common.ReplicationType;
 import org.opensearch.test.InternalTestCluster;
 
-import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -136,7 +135,7 @@ public class DataFormatAwareMultiIndexRecoveryIT extends DataFormatAwareReplicat
             .put("index.pluggable.dataformat.enabled", true)
             .put("index.pluggable.dataformat", "composite")
             .put("index.composite.primary_data_format", "parquet")
-            .putList("index.composite.secondary_data_formats", List.of())
+            .putList("index.composite.secondary_data_formats", DataFormatAwareITUtils.DEFAULT_SECONDARY_FORMATS)
             .build();
 
         client().admin().indices().prepareCreate(INDEX_NAME).setSettings(multiShardSettings).get();

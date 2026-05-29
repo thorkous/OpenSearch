@@ -156,19 +156,19 @@ public class DataFormatAwareRestoreShallowSnapshotV2IT extends AbstractSnapshotI
     }
 
     /**
-     * Secondary data formats for the DFA index. By default this is empty (parquet-only).
+     * Secondary data formats for the DFA index. By default this is lucene.
      * Subclasses (e.g. {@code DataFormatAwareRestoreShallowSnapshotV2WithLuceneIT}) override
      * this to add lucene as a secondary format.
      */
     protected List<String> getSecondaryDataFormats() {
-        return List.of();
+        return List.of("lucene");
     }
 
     /**
      * Whether lucene is configured as a secondary format. Drives format-aware on-disk assertions.
      */
     protected boolean hasLuceneSecondary() {
-        return false;
+        return true;
     }
 
     protected Settings.Builder getIndexSettings(int numOfShards, int numOfReplicas) {
@@ -343,7 +343,9 @@ public class DataFormatAwareRestoreShallowSnapshotV2IT extends AbstractSnapshotI
 
         IndexShard shardBefore = getShardZero(indexName);
         assertAllFormatDirsHaveFiles(shardBefore);
-        assertLuceneIndexDirContents(shardBefore);
+        if (!hasLuceneSecondary()) {
+            assertLuceneIndexDirContents(shardBefore);
+        }
         // Catalog must match what's on local disk and what was uploaded to remote
         DataFormatAwareITUtils.assertCatalogMatchesLocalAndRemote(shardBefore);
         // Capture exhaustive pre-snapshot state for tight post-restore comparison

@@ -12,13 +12,16 @@ import org.apache.lucene.index.IndexCommit;
 import org.opensearch.common.Nullable;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.common.concurrent.GatedCloseable;
+import org.opensearch.index.engine.Engine;
 import org.opensearch.index.engine.EngineConfig;
 import org.opensearch.index.engine.EngineException;
 import org.opensearch.index.engine.LifecycleAware;
 import org.opensearch.index.engine.SafeCommitInfo;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
+import org.opensearch.index.get.DocumentLookupResult;
 import org.opensearch.index.translog.Translog;
 import org.opensearch.index.translog.TranslogManager;
+import org.opensearch.plugins.DocumentLookupProvider;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -198,4 +201,14 @@ public interface Indexer
      * Caller MUST close the returned handle to release the refcount.
      */
     GatedCloseable<CatalogSnapshot> acquireLastCommittedSnapshot(boolean flushFirst) throws EngineException, IOException;
+
+    /**
+     * Resolves a document by id via a pluggable lookup path (see
+     * {@link DocumentLookupProvider}). Not supported by default;
+     * implementations that have a non-Lucene row store override this.
+     */
+    default DocumentLookupResult getById(Engine.Get get) throws IOException {
+        throw new UnsupportedOperationException("getById not supported for " + getClass().getSimpleName());
+    }
+
 }

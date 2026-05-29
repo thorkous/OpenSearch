@@ -33,7 +33,6 @@ import org.opensearch.test.OpenSearchIntegTestCase;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collection;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -90,7 +89,7 @@ public class DataFormatAwareRemoteStoreRecoveryIT extends RemoteStoreBaseIntegTe
             .put("index.pluggable.dataformat.enabled", true)
             .put("index.pluggable.dataformat", "composite")
             .put("index.composite.primary_data_format", "parquet")
-            .putList("index.composite.secondary_data_formats", List.of())
+            .putList("index.composite.secondary_data_formats", DataFormatAwareITUtils.DEFAULT_SECONDARY_FORMATS)
             .build();
     }
 
@@ -101,7 +100,7 @@ public class DataFormatAwareRemoteStoreRecoveryIT extends RemoteStoreBaseIntegTe
 
     /** Whether lucene is configured as a secondary data format (produces searchable segment files). */
     protected boolean hasLuceneSecondary() {
-        return false;
+        return true;
     }
 
     /**

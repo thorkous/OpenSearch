@@ -11,6 +11,7 @@ package org.opensearch.be.datafusion;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
+import org.opensearch.analytics.spi.DocValueService;
 import org.opensearch.analytics.spi.QueryExecutionMetrics;
 import org.opensearch.be.datafusion.action.DataFusionStatsAction;
 import org.opensearch.be.datafusion.nativelib.NativeBridge;
@@ -29,9 +30,12 @@ import org.opensearch.core.indices.breaker.CircuitBreakerStats;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
 import org.opensearch.env.Environment;
 import org.opensearch.env.NodeEnvironment;
+import org.opensearch.index.engine.Engine;
 import org.opensearch.index.engine.dataformat.DataFormatRegistry;
 import org.opensearch.index.engine.dataformat.ReaderManagerConfig;
 import org.opensearch.index.engine.exec.EngineReaderManager;
+import org.opensearch.index.engine.exec.IndexReaderProvider;
+import org.opensearch.index.get.DocumentLookupResult;
 import org.opensearch.indices.breaker.BreakerSettings;
 import org.opensearch.monitor.os.OsProbe;
 import org.opensearch.nativebridge.spi.NativeMemoryFetcher;
@@ -40,6 +44,7 @@ import org.opensearch.plugin.stats.AnalyticsBackendNativeMemoryStats;
 import org.opensearch.plugin.stats.AnalyticsBackendTaskCancellationStats;
 import org.opensearch.plugins.ActionPlugin;
 import org.opensearch.plugins.CircuitBreakerPlugin;
+import org.opensearch.plugins.DocumentLookupProvider;
 import org.opensearch.plugins.NativeStoreHandle;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.plugins.SearchBackEndPlugin;
@@ -75,7 +80,8 @@ public class DataFusionPlugin extends Plugin
         SearchBackEndPlugin<DatafusionReader>,
         AnalyticsSearchBackendPlugin,
         ActionPlugin,
-        CircuitBreakerPlugin {
+        CircuitBreakerPlugin,
+        DocumentLookupProvider {
 
     private static final Logger logger = LogManager.getLogger(DataFusionPlugin.class);
 
@@ -296,6 +302,9 @@ public class DataFusionPlugin extends Plugin
     private volatile SimpleExtension.ExtensionCollection substraitExtensions;
     private volatile ClusterService clusterService;
     private volatile DatafusionSettings datafusionSettings;
+    // DocumentLookupProvider implementation. Construction deferred until the DataFusion service is live.
+    private volatile GetService getService;
+    private volatile DocValueService docValueService;
     private volatile CircuitBreaker datafusionBreaker;
 
     /**
@@ -377,6 +386,8 @@ public class DataFusionPlugin extends Plugin
         NativeMemoryUsageTracker.setNativeMemoryBudgetSupplier(() -> DATAFUSION_MEMORY_POOL_LIMIT.get(clusterService.getSettings()));
 
         this.substraitExtensions = loadSubstraitExtensions();
+        this.getService = new GetService(this);
+        this.docValueService = this.getService.toDocValueService();
 
         return Collections.singletonList(dataFusionService);
     }
@@ -655,5 +666,27 @@ public class DataFusionPlugin extends Plugin
             logger.debug("getTopQueriesByMemory: {} entries from native registry", result.size());
         }
         return result;
+    }
+
+    /**
+     * Non-Lucene get-by-id entry point. Delegates to {@link GetService}, which resolves the
+     * {@code _id} term via the sibling Lucene reader (accessed via data format registry), maps the
+     * hit to a parquet (generation, rowId) pair, and fetches the row through the native runtime.
+     */
+    @Override
+    public DocumentLookupResult getById(Engine.Get get, IndexReaderProvider.Reader reader, String indexName) throws IOException {
+        DocValueService service = this.docValueService;
+        if (service == null) {
+            throw new IllegalStateException("DataFusion get-by-id service not initialized — createComponents() has not been called");
+        }
+        return service.getById(get.id(), reader, indexName);
+    }
+
+    @Override
+    public List<DocumentLookupResult> getDocsBySeqNoRange(long fromSeqNoExclusive, IndexReaderProvider.Reader reader, String indexName)
+        throws IOException {
+        DocValueService service = this.docValueService;
+        if (service == null) return List.of();
+        return service.getDocsBySeqNoRange(fromSeqNoExclusive, reader, indexName);
     }
 }

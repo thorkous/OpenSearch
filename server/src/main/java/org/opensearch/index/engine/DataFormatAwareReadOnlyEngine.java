@@ -40,6 +40,7 @@ import org.opensearch.index.engine.exec.commit.CommitterConfig;
 import org.opensearch.index.engine.exec.commit.IndexStoreProvider;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshot;
 import org.opensearch.index.engine.exec.coord.CatalogSnapshotManager;
+import org.opensearch.index.get.DocumentLookupResult;
 import org.opensearch.index.mapper.DocumentMapperForType;
 import org.opensearch.index.mapper.SourceToParse;
 import org.opensearch.index.merge.MergeStats;
@@ -53,6 +54,7 @@ import org.opensearch.index.translog.Translog;
 import org.opensearch.index.translog.TranslogManager;
 import org.opensearch.index.translog.TranslogStats;
 import org.opensearch.indices.pollingingest.PollingIngestStats;
+import org.opensearch.plugins.DocumentLookupProvider;
 import org.opensearch.search.suggest.completion.CompletionStats;
 
 import java.io.Closeable;
@@ -120,11 +122,19 @@ public class DataFormatAwareReadOnlyEngine implements Indexer {
     // Stats cache — populated once at construction (snapshot is permanent for this engine).
     private final CatalogSnapshotStatsCache statsCache;
 
+    @Nullable
+    private final DocumentLookupProvider documentLookupProvider;
+
     public DataFormatAwareReadOnlyEngine(EngineConfig engineConfig) {
+        this(engineConfig, null);
+    }
+
+    public DataFormatAwareReadOnlyEngine(EngineConfig engineConfig, @Nullable DocumentLookupProvider documentLookupProvider) {
         this.logger = Loggers.getLogger(DataFormatAwareReadOnlyEngine.class, engineConfig.getShardId());
         assert engineConfig.isReadOnlyReplica() == false : "DataFormatAwareReadOnlyEngine must only be created for primary shards; shard "
             + engineConfig.getShardId();
         this.engineConfig = engineConfig;
+        this.documentLookupProvider = documentLookupProvider;
         this.shardId = engineConfig.getShardId();
         this.store = engineConfig.getStore();
 
@@ -303,6 +313,38 @@ public class DataFormatAwareReadOnlyEngine implements Indexer {
     @Override
     public Engine.NoOpResult noOp(Engine.NoOp noOp) throws IOException {
         throw new UnsupportedOperationException("DataFormatAwareReadOnlyEngine does not support no-ops");
+    }
+
+    @Override
+    public DocumentLookupResult getById(Engine.Get get) throws IOException {
+        if (documentLookupProvider == null) {
+            return DocumentLookupResult.notFound(get.id());
+        }
+        if (reader.catalogSnapshot().getSegments().isEmpty()) {
+            return DocumentLookupResult.notFound(get.id());
+        }
+        DocumentLookupResult result = documentLookupProvider.getById(get, reader, shardId.getIndexName());
+        if (result.exists()) {
+            if (get.versionType().isVersionConflictForReads(result.version(), get.version())) {
+                throw new VersionConflictEngineException(
+                    shardId,
+                    get.id(),
+                    get.versionType().explainConflictForReads(result.version(), get.version())
+                );
+            }
+            if (get.getIfSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO
+                && (get.getIfSeqNo() != result.seqNo() || get.getIfPrimaryTerm() != result.primaryTerm())) {
+                throw new VersionConflictEngineException(
+                    shardId,
+                    get.id(),
+                    get.getIfSeqNo(),
+                    get.getIfPrimaryTerm(),
+                    result.seqNo(),
+                    result.primaryTerm()
+                );
+            }
+        }
+        return result;
     }
 
     @Override
