@@ -160,6 +160,9 @@ async fn build_dataframe(
 ///   row-groups/pages via min/max stats.
 /// - [`InternalSearch::SeqNoAbove`]: `SELECT _id,_seq_no,_primary_term,_version WHERE _seq_no > f`
 ///   (version-map restore on recovery; metadata columns only).
+/// - [`InternalSearch::VersionByRowId`]: as `ByRowId`, but projecting only the version-metadata
+///   columns the update path reads. Narrowed to the columns the file actually has, since a segment
+///   written before a metadata column existed would otherwise fail on an unknown name.
 ///
 /// Panics on [`InternalSearch::Off`] — callers gate on `is_internal_search()` first.
 async fn internal_search_dataframe(
@@ -176,6 +179,25 @@ async fn internal_search_dataframe(
         InternalSearch::SeqNoAbove(seq_no_floor) => df
             .filter(col("_seq_no").gt(lit(seq_no_floor)))?
             .select_columns(&["_id", "_seq_no", "_primary_term", "_version"]),
+        InternalSearch::VersionByRowId(row_id) => {
+            let row = df
+                .filter(col(crate::ROW_ID_COLUMN_NAME).eq(lit(row_id)))?
+                .limit(0, Some(1))?;
+            let present: Vec<&str> = ["_seq_no", "_primary_term", "_version"]
+                .into_iter()
+                .filter(|name| {
+                    row.schema()
+                        .fields()
+                        .iter()
+                        .any(|field| field.name().as_str() == *name)
+                })
+                .collect();
+            if present.is_empty() {
+                Ok(row)
+            } else {
+                row.select_columns(&present)
+            }
+        }
         InternalSearch::Off => unreachable!("internal_search_dataframe called with Off"),
     }
 }

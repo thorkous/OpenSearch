@@ -8,6 +8,7 @@
 
 package org.opensearch.analytics.spi;
 
+import org.opensearch.analytics.spi.DocumentRowReader.RowProjection;
 import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.common.lucene.uid.Versions;
 import org.opensearch.common.xcontent.XContentFactory;
@@ -62,7 +63,7 @@ public class DocumentLookupService {
         if (metadata == null) {
             return DocumentLookupResult.notFound(id);
         }
-        return buildResultFromRow(id, fetchRow(metadata, reader));
+        return buildResultFromRow(id, fetchRow(metadata, reader, RowProjection.ALL));
     }
 
     /**
@@ -74,27 +75,16 @@ public class DocumentLookupService {
         if (metadata == null) {
             return DocumentLookupResult.notFound(id);
         }
-        if (metadata.hasVersionMetadata()) {
-            return new DocumentLookupResult(
-                id,
-                metadata.version(),
-                true,
-                null,
-                metadata.seqNo(),
-                metadata.primaryTerm(),
-                Map.of(),
-                Map.of()
-            );
-        }
-        Map<String, Object> row = fetchRow(metadata, reader);
+        Map<String, Object> row = fetchRow(metadata, reader, RowProjection.VERSION_METADATA);
         long seqNo = extractLong(row, "_seq_no", SequenceNumbers.UNASSIGNED_SEQ_NO);
         long primaryTerm = extractLong(row, "_primary_term", SequenceNumbers.UNASSIGNED_PRIMARY_TERM);
         long version = extractLong(row, "_version", Versions.NOT_FOUND);
         return new DocumentLookupResult(id, version, true, null, seqNo, primaryTerm, Map.of(), Map.of());
     }
 
-    /** Fetches the raw row for an already-resolved document location. */
-    private Map<String, Object> fetchRow(DocumentMetadata metadata, IndexReaderProvider.Reader reader) throws IOException {
+    /** Fetches the requested columns of the row at an already-resolved document location. */
+    private Map<String, Object> fetchRow(DocumentMetadata metadata, IndexReaderProvider.Reader reader, RowProjection projection)
+        throws IOException {
         String id = metadata.id();
         WriterFileSet fileSet = reader.catalogSnapshot().findFileSet(executor.formatName(), metadata.writerGeneration());
         if (fileSet == null) {
@@ -107,7 +97,7 @@ public class DocumentLookupService {
             );
         }
 
-        Map<String, Object> row = executor.executeSingleRow(metadata.rowId(), fileSet);
+        Map<String, Object> row = executor.executeSingleRow(metadata.rowId(), fileSet, projection);
         if (row == null) {
             throw new IllegalStateException(
                 "Resolver located id ["

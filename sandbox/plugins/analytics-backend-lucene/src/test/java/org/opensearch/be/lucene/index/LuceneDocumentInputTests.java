@@ -151,10 +151,12 @@ public class LuceneDocumentInputTests extends LucenePluginBaseTests {
         return seqNoField;
     }
 
+    /** Mirrors {@link org.opensearch.be.lucene.LuceneDataFormat}: Lucene owns _primary_term's doc values. */
     private static MappedFieldType mockPrimaryTermField() {
         MappedFieldType primaryTermField = mock(MappedFieldType.class);
         when(primaryTermField.typeName()).thenReturn(SeqNoFieldMapper.PRIMARY_TERM_NAME);
         when(primaryTermField.name()).thenReturn(SeqNoFieldMapper.PRIMARY_TERM_NAME);
+        when(primaryTermField.getCapabilityMap()).thenReturn(Map.of(LucenePlugin.DATA_FORMAT, Set.of(COLUMNAR_STORAGE)));
         return primaryTermField;
     }
 }

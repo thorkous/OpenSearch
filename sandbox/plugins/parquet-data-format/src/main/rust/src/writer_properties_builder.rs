@@ -312,9 +312,18 @@ impl WriterPropertiesBuilder {
                 }) {
                     Some(Self::parse_compression_type(comp, level)?)
                 } else {
-                    // Metadata field defaults by name, then type-based defaults
+                    // Metadata field defaults by name, then type-based defaults.
+                    //
+                    // The engine's point-lookup columns are left UNCOMPRESSED. A single-document
+                    // lookup filters on `__row_id__` and projects the three version columns, so
+                    // compressing any of them would put a page decompress on the point-read path
+                    // for a few bytes of payload. All four are DELTA_BINARY_PACKED sequences of
+                    // small or near-sequential longs, which already pack to almost nothing, so
+                    // the space given up is negligible.
                     match field_name {
-                        "_primary_term" | "_version" => Some(Compression::UNCOMPRESSED),
+                        "__row_id__" | "_seq_no" | "_primary_term" | "_version" => {
+                            Some(Compression::UNCOMPRESSED)
+                        }
                         "_id" => Some(Self::parse_compression_type("LZ4_RAW", 0)?),
                         _ => match type_key {
                             Some("utf8") | Some("binary") => {
@@ -580,6 +589,87 @@ mod tests {
             matches!(props.compression(&col_path), Compression::SNAPPY),
             "expected SNAPPY but got {:?}",
             props.compression(&col_path)
+        );
+    }
+
+    /// The columns a single-document lookup touches — the `__row_id__` it filters on and the
+    /// three version columns it projects — are written uncompressed, so the point read decodes
+    /// no page. Other columns keep their existing defaults.
+    #[test]
+    fn test_point_lookup_columns_are_uncompressed_by_default() {
+        let config = NativeSettings::default();
+        let schema = schema_with(vec![
+            ("_seq_no", ArrowDataType::Int64),
+            ("_primary_term", ArrowDataType::Int64),
+            ("_version", ArrowDataType::Int64),
+            ("__row_id__", ArrowDataType::Int64),
+            ("age", ArrowDataType::Int64),
+            ("name", ArrowDataType::Utf8),
+        ]);
+        let props = WriterPropertiesBuilder::build(&config, &schema).unwrap();
+
+        for name in ["__row_id__", "_seq_no", "_primary_term", "_version"] {
+            let col_path = parquet::schema::types::ColumnPath::from(name);
+            assert_eq!(
+                props.compression(&col_path),
+                Compression::UNCOMPRESSED,
+                "{} should be uncompressed, got {:?}",
+                name,
+                props.compression(&col_path)
+            );
+        }
+
+        // Unchanged: plain numerics fall through to the global default, strings keep ZSTD.
+        let age_path = parquet::schema::types::ColumnPath::from("age");
+        assert!(
+            matches!(props.compression(&age_path), Compression::LZ4_RAW),
+            "age should keep the global LZ4_RAW default, got {:?}",
+            props.compression(&age_path)
+        );
+        let name_path = parquet::schema::types::ColumnPath::from("name");
+        assert!(
+            matches!(props.compression(&name_path), Compression::ZSTD(_)),
+            "utf8 should keep its ZSTD default, got {:?}",
+            props.compression(&name_path)
+        );
+    }
+
+    /// Precedence is unchanged: an explicit field-level or type-level codec still wins over
+    /// the by-name default, so an operator can opt back into compressing these columns.
+    #[test]
+    fn test_explicit_config_overrides_uncompressed_point_lookup_columns() {
+        let mut field_configs = HashMap::new();
+        field_configs.insert(
+            "_version".to_string(),
+            FieldConfig {
+                compression_type: Some("SNAPPY".to_string()),
+                ..Default::default()
+            },
+        );
+        let mut type_compression = HashMap::new();
+        type_compression.insert("int64".to_string(), "ZSTD".to_string());
+        let config = NativeSettings {
+            field_configs: Some(field_configs),
+            type_compression_configs: Some(type_compression),
+            ..Default::default()
+        };
+        let schema = schema_with(vec![
+            ("_seq_no", ArrowDataType::Int64),
+            ("_version", ArrowDataType::Int64),
+        ]);
+        let props = WriterPropertiesBuilder::build(&config, &schema).unwrap();
+
+        let version_path = parquet::schema::types::ColumnPath::from("_version");
+        assert!(
+            matches!(props.compression(&version_path), Compression::SNAPPY),
+            "field-level SNAPPY should win, got {:?}",
+            props.compression(&version_path)
+        );
+        let seq_no_path = parquet::schema::types::ColumnPath::from("_seq_no");
+        assert!(
+            matches!(props.compression(&seq_no_path), Compression::ZSTD(_)),
+            "type-level ZSTD should win, got {:?}",
+            props.compression(&seq_no_path)
         );
     }
 

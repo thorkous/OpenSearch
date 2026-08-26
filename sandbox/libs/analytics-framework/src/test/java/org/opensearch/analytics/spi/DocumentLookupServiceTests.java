@@ -8,6 +8,7 @@
 
 package org.opensearch.analytics.spi;
 
+import org.opensearch.analytics.spi.DocumentRowReader.RowProjection;
 import org.opensearch.common.lucene.uid.Versions;
 import org.opensearch.core.index.Index;
 import org.opensearch.index.engine.exec.DocumentMetadataResolver;
@@ -26,13 +27,10 @@ import java.util.Map;
 
 import org.mockito.ArgumentCaptor;
 
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -120,7 +118,7 @@ public class DocumentLookupServiceTests extends OpenSearchTestCase {
         when(resolver.resolveMetadata(reader, "doc1")).thenReturn(metadata("doc1", 0L, 7L));
         WriterFileSet fs = fileSet(7L, "0.parquet");
         when(snapshot.findFileSet(FORMAT, 7L)).thenReturn(fs);
-        when(executor.executeSingleRow(0L, fs)).thenReturn(
+        when(executor.executeSingleRow(0L, fs, RowProjection.ALL)).thenReturn(
             row("_id", "doc1", "_seq_no", 42L, "_primary_term", 2L, "_version", 5L, "__row_id__", 99L, "name", "alice", "age", 30)
         );
 
@@ -150,7 +148,9 @@ public class DocumentLookupServiceTests extends OpenSearchTestCase {
         WriterFileSet fs = fileSet(7L, "0.parquet");
         when(snapshot.findFileSet(FORMAT, 7L)).thenReturn(fs);
         // "_custom" is not a registered metadata field, not _primary_term, not __row_id__ -> kept in _source.
-        when(executor.executeSingleRow(0L, fs)).thenReturn(row("_id", "doc1", "_seq_no", 1L, "_custom", "keepme", "name", "bob"));
+        when(executor.executeSingleRow(0L, fs, RowProjection.ALL)).thenReturn(
+            row("_id", "doc1", "_seq_no", 1L, "_custom", "keepme", "name", "bob")
+        );
 
         DocumentLookupResult result = service.getById("doc1", reader, INDEX);
 
@@ -173,7 +173,7 @@ public class DocumentLookupServiceTests extends OpenSearchTestCase {
         when(resolver.resolveMetadata(reader, "doc1")).thenReturn(metadata("doc1", 0L, 7L));
         WriterFileSet fs = fileSet(7L, "0.parquet");
         when(snapshot.findFileSet(FORMAT, 7L)).thenReturn(fs);
-        when(executor.executeSingleRow(0L, fs)).thenReturn(null);
+        when(executor.executeSingleRow(0L, fs, RowProjection.ALL)).thenReturn(null);
 
         IllegalStateException e = expectThrows(IllegalStateException.class, () -> service.getById("doc1", reader, INDEX));
         assertTrue(e.getMessage(), e.getMessage().contains("backend returned no row"));
@@ -196,7 +196,9 @@ public class DocumentLookupServiceTests extends OpenSearchTestCase {
         when(resolver.resolveMetadata(reader, "doc1")).thenReturn(metadata("doc1", 0L, 7L));
         WriterFileSet fs = fileSet(7L, "0.parquet");
         when(snapshot.findFileSet(FORMAT, 7L)).thenReturn(fs);
-        when(executor.executeSingleRow(0L, fs)).thenReturn(row("_seq_no", 42L, "_primary_term", 2L, "_version", 5L, "name", "alice"));
+        when(executor.executeSingleRow(0L, fs, RowProjection.VERSION_METADATA)).thenReturn(
+            row("_seq_no", 42L, "_primary_term", 2L, "_version", 5L)
+        );
 
         DocumentLookupResult result = service.getVersionMetadata("doc1", reader, INDEX);
 
@@ -214,7 +216,7 @@ public class DocumentLookupServiceTests extends OpenSearchTestCase {
         WriterFileSet fs = fileSet(7L, "0.parquet");
         when(snapshot.findFileSet(FORMAT, 7L)).thenReturn(fs);
         // row exists (found) but carries no version fields
-        when(executor.executeSingleRow(0L, fs)).thenReturn(row("name", "alice"));
+        when(executor.executeSingleRow(0L, fs, RowProjection.VERSION_METADATA)).thenReturn(row("name", "alice"));
 
         DocumentLookupResult result = service.getVersionMetadata("doc1", reader, INDEX);
 
@@ -222,38 +224,6 @@ public class DocumentLookupServiceTests extends OpenSearchTestCase {
         assertEquals(Versions.NOT_FOUND, result.version());
         assertEquals(SequenceNumbers.UNASSIGNED_SEQ_NO, result.seqNo());
         assertEquals(SequenceNumbers.UNASSIGNED_PRIMARY_TERM, result.primaryTerm());
-    }
-
-    public void testGetVersionMetadata_servedFromResolverWithoutReadingRow() throws Exception {
-        when(resolver.resolveMetadata(reader, "doc1")).thenReturn(
-            new DocumentMetadataResolver.DocumentMetadata("doc1", 0L, 7L, 5L, 42L, 2L)
-        );
-
-        DocumentLookupResult result = service.getVersionMetadata("doc1", reader, INDEX);
-
-        assertTrue(result.exists());
-        assertEquals(5L, result.version());
-        assertEquals(42L, result.seqNo());
-        assertEquals(2L, result.primaryTerm());
-        assertNull(result.source());
-
-        verify(executor, never()).executeSingleRow(anyLong(), any());
-        verify(snapshot, never()).findFileSet(any(), anyLong());
-    }
-
-    public void testGetVersionMetadata_fallsBackToRowWhenResolverReportsPartialMetadata() throws Exception {
-        when(resolver.resolveMetadata(reader, "doc1")).thenReturn(
-            new DocumentMetadataResolver.DocumentMetadata("doc1", 0L, 7L, 5L, DocumentMetadataResolver.UNSET, 2L)
-        );
-        WriterFileSet fs = fileSet(7L, "0.parquet");
-        when(snapshot.findFileSet(FORMAT, 7L)).thenReturn(fs);
-        when(executor.executeSingleRow(0L, fs)).thenReturn(row("_seq_no", 42L, "_primary_term", 2L, "_version", 5L));
-
-        DocumentLookupResult result = service.getVersionMetadata("doc1", reader, INDEX);
-
-        assertTrue(result.exists());
-        assertEquals(42L, result.seqNo());
-        verify(executor).executeSingleRow(0L, fs);
     }
 
     // ---- getDocsAboveSeqNo --------------------------------------------------

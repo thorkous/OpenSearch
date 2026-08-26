@@ -3543,6 +3543,29 @@ fn read_compression_from_parquet(filename: &str) -> parquet::basic::Compression 
     rg.column(0).compression()
 }
 
+/// Helper: reads the compression codec of a named column in the first row group.
+fn read_column_compression_from_parquet(
+    filename: &str,
+    column_name: &str,
+) -> parquet::basic::Compression {
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+
+    let file = File::open(filename).unwrap();
+    let reader = SerializedFileReader::new(file).unwrap();
+    let metadata = reader.metadata();
+    assert!(
+        metadata.num_row_groups() > 0,
+        "File should have at least one row group"
+    );
+    let rg = metadata.row_group(0);
+    for i in 0..rg.num_columns() {
+        if rg.column(i).column_path().string() == column_name {
+            return rg.column(i).compression();
+        }
+    }
+    panic!("column '{}' not found in row group", column_name);
+}
+
 /// Helper: checks whether bloom filter metadata is present in the first row group's columns.
 fn has_bloom_filter_in_parquet(filename: &str) -> bool {
     use parquet::file::reader::{FileReader, SerializedFileReader};
@@ -3703,6 +3726,159 @@ fn test_writer_properties_honored_single_chunk_snappy_no_bloom() {
     assert_eq!(ages, vec![10, 20, 30, 40, 50]);
 
     SETTINGS_STORE.remove(index_name);
+}
+
+/// Helper: schema carrying the version-metadata columns a single-document lookup projects.
+fn create_version_metadata_schema_ptr() -> (Arc<arrow::datatypes::Schema>, i64) {
+    let schema = Arc::new(version_metadata_schema());
+    let ffi_schema = arrow::ffi::FFI_ArrowSchema::try_from(schema.as_ref()).unwrap();
+    let schema_ptr = Box::into_raw(Box::new(ffi_schema)) as i64;
+    (schema, schema_ptr)
+}
+
+fn version_metadata_schema() -> arrow::datatypes::Schema {
+    use crate::merge::schema::ROW_ID_COLUMN_NAME;
+    use arrow::datatypes::{DataType, Field, Schema};
+
+    Schema::new(vec![
+        Field::new("age", DataType::Int32, false),
+        Field::new("name", DataType::Utf8, true),
+        Field::new("_seq_no", DataType::Int64, false),
+        Field::new("_primary_term", DataType::Int64, false),
+        Field::new("_version", DataType::Int64, false),
+        Field::new(ROW_ID_COLUMN_NAME, DataType::Int64, false),
+    ])
+}
+
+/// Helper: FFI data for [`version_metadata_schema`], one row per supplied age.
+fn create_ffi_data_with_version_metadata(ages: Vec<i32>) -> (i64, i64) {
+    use arrow::array::{Array, Int32Array, Int64Array, StringArray};
+    use arrow::record_batch::RecordBatch;
+
+    let schema = Arc::new(version_metadata_schema());
+    let rows = ages.len();
+    let names: Vec<Option<String>> = (0..rows).map(|i| Some(format!("n{}", i))).collect();
+    let longs = |base: i64| -> Arc<dyn Array> {
+        Arc::new(Int64Array::from(
+            (0..rows).map(|i| base + i as i64).collect::<Vec<i64>>(),
+        ))
+    };
+    let columns: Vec<Arc<dyn Array>> = vec![
+        Arc::new(Int32Array::from(ages)),
+        Arc::new(StringArray::from(names)),
+        longs(100), // _seq_no
+        longs(1),   // _primary_term
+        longs(1),   // _version
+        longs(0),   // __row_id__
+    ];
+    let record_batch = RecordBatch::try_new(schema, columns).unwrap();
+    let struct_array = arrow::array::StructArray::from(record_batch);
+    let (ffi_array, ffi_schema) = arrow::ffi::to_ffi(&struct_array.to_data()).unwrap();
+    (
+        Box::into_raw(Box::new(ffi_array)) as i64,
+        Box::into_raw(Box::new(ffi_schema)) as i64,
+    )
+}
+
+/// Test: the columns a single-document lookup touches are written UNCOMPRESSED even when the
+/// index-level codec is ZSTD, while every other column still honors the configured codec.
+/// Proves the per-column override reaches the output file.
+#[test]
+fn test_point_lookup_columns_written_uncompressed() {
+    use parquet::basic::Compression;
+
+    let (_temp_dir, filename) = get_temp_file_path("props_point_lookup.parquet");
+    let index_name = "test-props-point-lookup";
+
+    let mut settings = NativeSettings::default();
+    settings.sort_columns = vec!["age".to_string()];
+    settings.reverse_sorts = vec![false];
+    settings.nulls_first = vec![false];
+    settings.sort_in_memory_threshold_bytes = Some(10 * 1024 * 1024); // Large — single chunk
+    settings.compression_type = Some("ZSTD".to_string());
+    settings.compression_level = Some(3);
+    SETTINGS_STORE.insert(index_name.to_string(), settings);
+
+    let (_schema, schema_ptr) = create_version_metadata_schema_ptr();
+    NativeParquetWriter::create_writer(
+        filename.clone(),
+        index_name.to_string(),
+        schema_ptr,
+        vec!["age".to_string()],
+        vec![false],
+        vec![false],
+        77i64,
+    )
+    .unwrap();
+
+    let (ap, sp) = create_ffi_data_with_version_metadata(vec![30, 10, 50, 20, 40]);
+    NativeParquetWriter::write_data(filename.clone(), ap, sp).unwrap();
+    NativeParquetWriter::finalize_writer(filename.clone()).unwrap();
+
+    for column in [
+        crate::merge::schema::ROW_ID_COLUMN_NAME,
+        "_seq_no",
+        "_primary_term",
+        "_version",
+    ] {
+        let codec = read_column_compression_from_parquet(&filename, column);
+        assert_eq!(
+            codec,
+            Compression::UNCOMPRESSED,
+            "{} should be written uncompressed, got: {:?}",
+            column,
+            codec
+        );
+    }
+
+    // Unchanged: ordinary columns follow the index-level codec.
+    for column in ["age", "name"] {
+        let codec = read_column_compression_from_parquet(&filename, column);
+        assert!(
+            matches!(codec, Compression::ZSTD(_)),
+            "{} should honor the index-level ZSTD codec, got: {:?}",
+            column,
+            codec
+        );
+    }
+
+    // Data is still readable and correctly sorted.
+    let ages = read_ages_from_parquet(&filename);
+    assert_eq!(ages, vec![10, 20, 30, 40, 50]);
+
+    // The uncompressed columns decode correctly on read. Rows were written in age order
+    // 30,10,50,20,40 with _version = 1 + write position, then sorted by age, so ascending
+    // age yields the versions in write-position order 2,4,1,5,3.
+    let versions = read_longs_from_parquet(&filename, "_version");
+    assert_eq!(versions, vec![2, 4, 1, 5, 3]);
+    let seq_nos = read_longs_from_parquet(&filename, "_seq_no");
+    assert_eq!(seq_nos, vec![101, 103, 100, 104, 102]);
+    // __row_id__ is re-stamped sequentially over the sorted rows.
+    assert_eq!(read_row_ids_from_parquet(&filename), vec![0, 1, 2, 3, 4]);
+
+    SETTINGS_STORE.remove(index_name);
+}
+
+/// Helper: reads an Int64 column's values from a Parquet file, in file row order.
+fn read_longs_from_parquet(filename: &str, column_name: &str) -> Vec<i64> {
+    use arrow::array::Int64Array;
+    use arrow::compute::concat_batches;
+
+    let batches = read_parquet_file(filename);
+    if batches.is_empty() {
+        return vec![];
+    }
+    let combined = concat_batches(&batches[0].schema(), &batches).unwrap();
+    let idx = combined
+        .schema()
+        .index_of(column_name)
+        .unwrap_or_else(|_| panic!("column '{}' should exist", column_name));
+    let col = combined
+        .column(idx)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap_or_else(|| panic!("column '{}' should be Int64", column_name));
+    (0..col.len()).map(|i| col.value(i)).collect()
 }
 
 /// Test: Writer properties (ZSTD compression, bloom filter enabled) are honored

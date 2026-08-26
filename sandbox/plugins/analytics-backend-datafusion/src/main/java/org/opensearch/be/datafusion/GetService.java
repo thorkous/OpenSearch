@@ -105,7 +105,7 @@ public class GetService implements Closeable {
         }
 
         @Override
-        public Map<String, Object> executeSingleRow(long rowId, WriterFileSet parquetSet) throws IOException {
+        public Map<String, Object> executeSingleRow(long rowId, WriterFileSet parquetSet, RowProjection projection) throws IOException {
             if (rowId < 0) {
                 throw new IllegalArgumentException("rowId must be non-negative, got: " + rowId);
             }
@@ -124,13 +124,12 @@ public class GetService implements Closeable {
                 // equals the row's __row_id__. An equality predicate returns exactly that row
                 // independent of scan order and lets DataFusion prune row-groups/pages via the
                 // column's min/max statistics.
-                long streamPtr = executeInternalSearch(
-                    readerPtr,
-                    runtimePtr,
-                    NativeBridge.INTERNAL_SEARCH_BY_ROW_ID,
-                    rowId,
-                    "DataFusion get-by-id query failed"
-                );
+                // VERSION_METADATA narrows the native projection to the metadata columns, so an update's
+                // version resolution does not decode every column of the row.
+                long mode = projection == RowProjection.VERSION_METADATA
+                    ? NativeBridge.INTERNAL_SEARCH_VERSION_BY_ROW_ID
+                    : NativeBridge.INTERNAL_SEARCH_BY_ROW_ID;
+                long streamPtr = executeInternalSearch(readerPtr, runtimePtr, mode, rowId, "DataFusion get-by-id query failed");
                 return readSingleRow(streamPtr);
             }
         }

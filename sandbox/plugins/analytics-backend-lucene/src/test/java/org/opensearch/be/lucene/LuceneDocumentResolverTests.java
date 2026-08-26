@@ -27,7 +27,6 @@ import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
 import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.dataformat.DocumentInput;
-import org.opensearch.index.engine.exec.DocumentMetadataResolver;
 import org.opensearch.index.engine.exec.DocumentMetadataResolver.DocumentMetadata;
 import org.opensearch.index.engine.exec.IndexReaderProvider;
 import org.opensearch.index.mapper.IdFieldMapper;
@@ -86,19 +85,12 @@ public class LuceneDocumentResolverTests extends OpenSearchTestCase {
                 assertEquals("doc1", md.id());
                 assertEquals(9L, md.rowId());
                 assertEquals(5L, md.writerGeneration());
-                assertTrue(md.hasVersionMetadata());
-                assertEquals(7L, md.version());
-                assertEquals(42L, md.seqNo());
-                assertEquals(3L, md.primaryTerm());
             }
         }
     }
 
-    /**
-     * A segment written before version doc values existed still resolves its row location; the version
-     * fields report {@code UNSET} so the caller falls back to reading the primary store.
-     */
-    public void testResolveMetadata_withoutVersionDocValues_reportsUnset() throws IOException {
+    /** A segment carrying only the row id still resolves its location. */
+    public void testResolveMetadata_rowIdOnly_resolvesLocation() throws IOException {
         try (Directory dir = new ByteBuffersDirectory()) {
             try (IndexWriter w = new IndexWriter(dir, iwc(codecWithGeneration("5")))) {
                 Document doc = new Document();
@@ -112,10 +104,7 @@ public class LuceneDocumentResolverTests extends OpenSearchTestCase {
                 DocumentMetadata md = resolver.resolveMetadata(readerReturning(dr), "doc1");
                 assertNotNull(md);
                 assertEquals(9L, md.rowId());
-                assertFalse(md.hasVersionMetadata());
-                assertEquals(DocumentMetadataResolver.UNSET, md.version());
-                assertEquals(DocumentMetadataResolver.UNSET, md.seqNo());
-                assertEquals(DocumentMetadataResolver.UNSET, md.primaryTerm());
+                assertEquals(5L, md.writerGeneration());
             }
         }
     }

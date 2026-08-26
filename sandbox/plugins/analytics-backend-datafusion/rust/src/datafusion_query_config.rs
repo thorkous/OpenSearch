@@ -22,15 +22,21 @@ pub enum InternalSearch {
     /// Seq-no scan: `_seq_no > bound`, projecting only id/seq/term/version.
     /// Used by version-map restore on crash recovery.
     SeqNoAbove(i64),
+    /// Version metadata by row id: `__row_id__ = bound`, projecting only
+    /// seq/term/version. Used by the update path, which resolves a document's
+    /// current version and needs no other column.
+    VersionByRowId(i64),
 }
 
 impl InternalSearch {
     /// Decodes the FFM wire pair `(mode, bound)`. `mode`: 0 = Off, 1 = ByRowId,
-    /// 2 = SeqNoAbove. Any other value is treated as Off (forward-compatible).
+    /// 2 = SeqNoAbove, 3 = VersionByRowId. Any other value is treated as Off
+    /// (forward-compatible).
     pub fn from_wire(mode: i64, bound: i64) -> Self {
         match mode {
             1 => InternalSearch::ByRowId(bound),
             2 => InternalSearch::SeqNoAbove(bound),
+            3 => InternalSearch::VersionByRowId(bound),
             _ => InternalSearch::Off,
         }
     }
@@ -261,11 +267,16 @@ mod tests {
             InternalSearch::from_wire(2, 7),
             InternalSearch::SeqNoAbove(7)
         );
+        assert_eq!(
+            InternalSearch::from_wire(3, 11),
+            InternalSearch::VersionByRowId(11)
+        );
         // Unknown modes are forward-compatible: treated as Off, bound ignored.
-        assert_eq!(InternalSearch::from_wire(3, 5), InternalSearch::Off);
+        assert_eq!(InternalSearch::from_wire(4, 5), InternalSearch::Off);
         assert!(!InternalSearch::Off.is_internal_search());
         assert!(InternalSearch::ByRowId(0).is_internal_search());
         assert!(InternalSearch::SeqNoAbove(0).is_internal_search());
+        assert!(InternalSearch::VersionByRowId(0).is_internal_search());
     }
 
     #[test]

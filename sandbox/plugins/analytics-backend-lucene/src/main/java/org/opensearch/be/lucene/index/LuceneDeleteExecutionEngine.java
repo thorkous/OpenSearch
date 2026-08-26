@@ -65,8 +65,8 @@ public class LuceneDeleteExecutionEngine implements DeleteExecutionEngine<DataFo
      */
     private final AtomicLong maxCheckedOutGeneration = new AtomicLong(-1L);
 
-    private static final long BASE_BYTES_PER_ID_TO_GEN_ENTRY = RamUsageEstimator.HASHTABLE_RAM_BYTES_PER_ENTRY
-        + RamUsageEstimator.shallowSizeOfInstance(GenRow.class);
+    private static final long BASE_BYTES_PER_ID_TO_GEN_ENTRY = RamUsageEstimator.HASHTABLE_RAM_BYTES_PER_ENTRY + RamUsageEstimator
+        .shallowSizeOfInstance(GenRow.class);
     /** Running footprint of {@link #idToGen}, maintained incrementally so reads never scan the map. */
     private final AtomicLong idToGenRamBytesUsed = new AtomicLong();
 

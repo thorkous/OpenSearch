@@ -19,8 +19,6 @@ import org.opensearch.common.annotation.ExperimentalApi;
 import org.opensearch.index.engine.dataformat.DocumentInput;
 import org.opensearch.index.engine.dataformat.FieldTypeCapabilities;
 import org.opensearch.index.mapper.MappedFieldType;
-import org.opensearch.index.mapper.SeqNoFieldMapper;
-import org.opensearch.index.mapper.VersionFieldMapper;
 
 import java.util.Set;
 
@@ -42,13 +40,6 @@ import java.util.Set;
  */
 @ExperimentalApi
 public class LuceneDocumentInput implements DocumentInput<Document> {
-
-    /** Version metadata mirrored to Lucene doc values for update-time resolution. */
-    private static final Set<String> VERSION_METADATA_TYPES = Set.of(
-        VersionFieldMapper.CONTENT_TYPE,
-        SeqNoFieldMapper.CONTENT_TYPE,
-        SeqNoFieldMapper.PRIMARY_TERM_NAME
-    );
 
     private final Document document;
     private final LuceneFieldFactoryRegistry fieldFactoryRegistry;
@@ -98,14 +89,7 @@ public class LuceneDocumentInput implements DocumentInput<Document> {
     public void addField(MappedFieldType fieldType, Object value) {
         Set<FieldTypeCapabilities.Capability> capabilities = fieldType.getCapabilityMap().getOrDefault(LucenePlugin.DATA_FORMAT, Set.of());
         if (capabilities.isEmpty()) {
-            // Mirror version metadata as doc values for update-time resolution.
-            if (VERSION_METADATA_TYPES.contains(fieldType.typeName())) {
-                requireNonNullValue(fieldType, value);
-                LuceneFieldFactory factory = fieldFactory(fieldType);
-                if (factory != null) {
-                    factory.addField(document, fieldType, value, null);
-                }
-            }
+            // nothing to support on this format for this field.
             return;
         }
         requireNonNullValue(fieldType, value);

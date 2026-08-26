@@ -1092,6 +1092,12 @@ public final class NativeBridge {
     public static final long INTERNAL_SEARCH_BY_ROW_ID = 1L;
     /** {@code internal_search_mode}: seq-no scan — native plan filters {@code _seq_no > bound}, {@code substraitPlan} ignored. */
     public static final long INTERNAL_SEARCH_SEQ_NO_ABOVE = 2L;
+    /**
+     * {@code internal_search_mode}: version metadata by row id — as {@link #INTERNAL_SEARCH_BY_ROW_ID}, but
+     * projecting only the version-metadata columns, so an update's version resolution does not decode the
+     * whole row. {@code substraitPlan} ignored.
+     */
+    public static final long INTERNAL_SEARCH_VERSION_BY_ROW_ID = 3L;
 
     public static void executeQueryAsync(
         long readerPtr,

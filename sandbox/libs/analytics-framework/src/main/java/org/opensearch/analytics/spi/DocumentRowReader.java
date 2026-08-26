@@ -38,7 +38,20 @@ public interface DocumentRowReader {
      * @param fileSet the file set to read from
      * @return the row as a field-name → value map, or null if not found
      */
-    Map<String, Object> executeSingleRow(long rowId, WriterFileSet fileSet) throws IOException;
+    Map<String, Object> executeSingleRow(long rowId, WriterFileSet fileSet, RowProjection projection) throws IOException;
+
+    /** Reads every column of the row. */
+    default Map<String, Object> executeSingleRow(long rowId, WriterFileSet fileSet) throws IOException {
+        return executeSingleRow(rowId, fileSet, RowProjection.ALL);
+    }
+
+    /** Which columns a row read needs. */
+    enum RowProjection {
+        /** Every column, for source reconstruction. */
+        ALL,
+        /** Only {@code _seq_no}, {@code _primary_term} and {@code _version}, for version resolution. */
+        VERSION_METADATA
+    }
 
     /**
      * Fetch all rows with {@code _seq_no > fromSeqNoExclusive} from the Core-resolved file sets
